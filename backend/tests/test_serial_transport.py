@@ -98,9 +98,61 @@ def test_reconnect_backoff_doubles_caps_and_resets():
     transport._port.read_error = serial.SerialException("unplugged")
     transport.receive(12)
     assert not transport.connected and transport.counts["disconnects"] == 1
-    for clock[0] in (12.5, 13):
+    for clock[0] in (13, 15.5):
         transport.receive(clock[0])
-    assert opener.attempts[-1] == 13
+    assert opener.attempts[-1] == 11
+    opener.ports.append(FakePort(FakeUno(1)))
+    clock[0] = 16
+    transport.receive(16)
+    assert transport.connected and opener.attempts[-1] == 16
+
+
+def failing_port(mode: str) -> FakePort:
+    port = FakePort(FakeUno(1))
+    if mode == "write":
+        port.write_results = [0]
+    else:
+        port.read_error = serial.SerialException("gone")
+    return port
+
+
+@pytest.mark.parametrize("mode", ["write", "read"])
+def test_backoff_survives_repeated_short_lived_connections(mode):
+    clock = [0.0]
+    opener = Opener(clock)
+    opener.ports += [failing_port(mode) for _ in range(6)]
+    transport = fake_transport(opener)
+    for step in range(33):
+        clock[0] = step / 2
+        transport.receive(clock[0])
+        transport.send(QUIET, clock[0])
+    assert opener.attempts == [0, 1, 3, 7, 11, 15]
+    assert transport.counts["opened"] == 6 and transport.counts["disconnects"] == 6
+    assert not transport.connected
+
+
+def test_backoff_resets_only_after_a_stable_connection():
+    clock = [0.0]
+    opener = Opener(clock)
+    stable = FakePort(FakeUno(1))
+    opener.ports += [failing_port("write") for _ in range(3)] + [stable]
+    opener.ports += [failing_port("write") for _ in range(2)]
+    transport = fake_transport(opener)
+    for clock[0] in (0, 1, 3):
+        transport.receive(clock[0])
+        transport.send(QUIET, clock[0])
+    clock[0] = 7
+    transport.receive(7)
+    for t in (7, 8, 9, 10):
+        transport.send(QUIET, t)
+    assert transport.connected
+    stable.write_results = [0]
+    transport.send(QUIET, 11)
+    for step in range(22, 40):
+        clock[0] = step / 2
+        transport.receive(clock[0])
+        transport.send(QUIET, clock[0])
+    assert opener.attempts == [0, 1, 3, 7, 12, 14, 18]
 
 
 def test_round_trip_over_a_fake_port_and_bounded_reads():
