@@ -14,7 +14,8 @@ Keep these current after every substantial task:
 - `docs/SAFETY.md`: failure modes, alarm behavior, safety limitations
 - `docs/PROJECT_STATUS.md`: completed work, current status, next steps
 - `docs/DEVELOPMENT_LOG.md`: per-task entry required by the handoff protocol
-- `docs/HARDWARE.md`: electrical interface assumptions
+- `docs/PROTOCOL.md`: serial protocol specification shared by Pi and Uno
+- `docs/HARDWARE.md`: electrical interface assumptions and provisional firmware timing
 - `docs/audits/`: dated audits; never rewrite a past audit's findings (link fixes only), add a new one
 
 Rename files with `git mv`; never create files that differ from an existing one only in

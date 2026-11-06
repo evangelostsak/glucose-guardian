@@ -10,20 +10,22 @@ number may be stale. Validate UTC timestamps before classifying glucose and show
 data age and explicit fault status in the future GUI. A network or hardware failure
 must have a distinct indication rather than presenting stale data as normal.
 
-Acknowledgement is temporary and never permanently disables an alert. The alarm
-engine caps every acknowledgement at 15 minutes, acknowledges glucose alarms and
-system faults separately, and re-sounds immediately on escalation, on a further
-`rearm_mg_dl` worsening, or on any new or returning fault (see
-[ARCHITECTURE.md](ARCHITECTURE.md)). Future firmware must implement equivalent
-bounds for the physical button and keep communication-fault handling independent.
-The current firmware has no button input or physical alarm output.
+Acknowledgement is temporary and never permanently disables an alert. A short press
+silences only the glucose channel and a 2-second hold silences only system faults,
+each for its own configured duration capped at 900 s. Repeated presses never extend a
+silence, and any escalation, further `rearm_mg_dl` worsening, or new or returning fault
+sounds immediately (see [ARCHITECTURE.md](ARCHITECTURE.md)). When the Pi is
+unavailable, the Uno demands its own link-lost alarm; a hold silences it for at most
+60 s, presses during that window do not extend it, and it re-arms automatically while
+the link stays lost. The firmware has no button pin and drives no output yet.
 
 ## Failure modes
 
-The simulated runtime (M2) connects the alarm engine to bounded acquisition, a clock
-check, a display frame and a transport double. There is still no Dexcom adapter,
-serial transport, GUI or physical output, so "simulated" below means verified with
-synthetic scenarios only.
+The runtime connects the alarm engine to bounded acquisition, a clock check, a
+display frame and either a transport double or the serial transport (M3). There is
+still no Dexcom adapter, GUI or physical output, and no hardware has been flashed.
+"Simulated" below means verified with synthetic scenarios; "PC-tested" means verified
+with pseudo-terminals, a Python Uno emulator, and native firmware unit tests.
 
 | Condition | Detected by | Indication | Status |
 |---|---|---|---|
@@ -34,17 +36,20 @@ synthetic scenarios only.
 | Fetch error or exception | Acquisition worker | `acquisition` fault; latest reading used until stale | Simulated; Dexcom adapter M4 |
 | Fetch blocked or slower than `fetch_timeout_s` | Acquisition worker hard timeout | `acquisition` fault; supervisor keeps ticking; one thread at most | Simulated |
 | Pi clock not synchronized (no RTC on the Pi 3B), or the check fails or times out | Clock-check worker | `clock_unsynchronized` fault; readings not evaluated | Simulated; systemd check unit-tested, not yet run on the Pi |
-| Uno heartbeat lost, or heartbeat query fails, seen from the Pi | Heartbeat age above `heartbeat_timeout_s` | `communication` fault | Simulated; serial transport M3 |
+| Uno silent, unplugged, or answering with corrupted, outdated, duplicate or wrong-version frames | Round-trip link age above `heartbeat_timeout_s` | `communication` fault; port reopened with backoff | PC-tested |
+| Pi serial write zero-length, partial or failing (output buffer full, device stalled) | Byte count checked on every write; writability checked before writing | Frame not counted as sent; output discarded; port reopened with backoff; `communication` fault if the link stays down | PC-tested |
+| Uno resets while connected (watchdog, brown-out, power glitch, reset button) | New boot counter, or a watchdog or brown-out cause at connection | `controller_reset` fault latched until a long press | PC-tested; reset causes need bench validation |
+| Button held 30 s or more | Uno stuck detection | `button_stuck` fault; the stuck press acknowledges nothing | PC-tested; no button pin yet |
 | Display or transport send failure | Runtime adapter guard | Counted and logged; alarm evaluation continues | Simulated |
 | Alarm-engine defect | Exception out of the loop | Service exits with status 1; heartbeats stop | Simulated; systemd restart M6 |
-| Pi process crash, hang or planned stop | Uno heartbeat timeout | Uno system fault | Firmware detects it internally; no output until M7 |
-| Uno failure or USB loss | Not yet | None | Pi-side Uno liveness in M3 |
+| Pi process crash, hang or planned stop; alarm loop stalled | No new state frame on the Uno for more than 5 s (10 s grace after boot) | Uno link-lost demand, independent of the Pi | PC-tested; no output until M7 |
+| Uno firmware hang | 2 s hardware watchdog resets the Uno | `controller_reset` on the Pi after reconnection | Watchdog reset requires bench validation |
 | Total power loss | Not possible | None | Requires backup power (hardware review) |
 
-Acknowledging a stale glucose alarm silences only the glucose channel; the
-missing-data fault keeps sounding until it is acknowledged separately. A button press
-acknowledges both audible channels independently for at most 15 minutes and clears
-neither the fault nor the retained glucose level.
+Acknowledging a stale glucose alarm with a short press silences only the glucose
+channel; the missing-data fault keeps sounding and the display prompts "Hold 2 s to
+silence". A hold silences the faults for `fault_acknowledgement_s` and clears neither
+the fault nor the retained glucose level.
 
 A restart is fail-safe but lossy: acknowledgements are forgotten and the system
 re-alarms, but a retained urgent low during stale data becomes unknown glucose with a

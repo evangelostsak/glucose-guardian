@@ -9,6 +9,8 @@ from .providers import Reading
 
 log = logging.getLogger(__name__)
 
+HOLD_PROMPT = "Hold 2 s to silence"
+
 
 @dataclass(frozen=True)
 class Frame:
@@ -21,6 +23,7 @@ class Frame:
     fault_audible: bool
     glucose_silenced: bool
     faults_silenced: bool
+    prompt: str | None
 
 
 def build_frame(state: State, last_valid: Reading | None, now: datetime) -> Frame:
@@ -35,6 +38,7 @@ def build_frame(state: State, last_valid: Reading | None, now: datetime) -> Fram
         fault_audible=state.fault_audible,
         glucose_silenced=state.glucose_silenced,
         faults_silenced=state.faults_silenced,
+        prompt=HOLD_PROMPT if state.fault_audible and not state.glucose_audible else None,
     )
 
 

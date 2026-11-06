@@ -27,6 +27,11 @@ class Fault(str, Enum):
     INVALID_READING = "invalid_reading"
     CLOCK = "clock_unsynchronized"
     COMMUNICATION = "communication"
+    CONTROLLER_RESET = "controller_reset"
+    BUTTON_STUCK = "button_stuck"
+
+
+CONTROLLER_FAULTS = frozenset({Fault.CONTROLLER_RESET, Fault.BUTTON_STUCK})
 
 
 @dataclass(frozen=True)
@@ -39,12 +44,14 @@ class Policy:
     max_age_s: float
     max_future_skew_s: float
     heartbeat_timeout_s: float
-    acknowledgement_s: float
+    glucose_acknowledgement_s: float
+    fault_acknowledgement_s: float
 
     def __post_init__(self) -> None:
         values = (self.urgent_low_mg_dl, self.low_mg_dl, self.high_mg_dl,
                   self.hysteresis_mg_dl, self.rearm_mg_dl, self.max_age_s,
-                  self.max_future_skew_s, self.heartbeat_timeout_s, self.acknowledgement_s)
+                  self.max_future_skew_s, self.heartbeat_timeout_s,
+                  self.glucose_acknowledgement_s, self.fault_acknowledgement_s)
         if not all(isfinite(v) and v > 0 for v in values):
             raise ValueError("policy values must be finite and positive")
         if not self.urgent_low_mg_dl < self.low_mg_dl < self.high_mg_dl:
@@ -53,8 +60,9 @@ class Policy:
             raise ValueError("hysteresis must not extend urgent low past the low threshold")
         if self.low_mg_dl + self.hysteresis_mg_dl >= self.high_mg_dl - self.hysteresis_mg_dl:
             raise ValueError("low and high hysteresis bands must not overlap")
-        if self.acknowledgement_s > MAX_ACKNOWLEDGEMENT_S:
-            raise ValueError(f"acknowledgement_s must not exceed {MAX_ACKNOWLEDGEMENT_S}")
+        if max(self.glucose_acknowledgement_s,
+               self.fault_acknowledgement_s) > MAX_ACKNOWLEDGEMENT_S:
+            raise ValueError(f"acknowledgement durations must not exceed {MAX_ACKNOWLEDGEMENT_S}")
 
 
 @dataclass(frozen=True)
@@ -125,22 +133,25 @@ class AlarmMachine:
 
     def acknowledge_glucose(self, monotonic_s: float) -> None:
         if self.state.glucose_audible:
-            self._glucose_ack = _GlucoseAck(self.state.glucose, self._mg_dl,
-                                            monotonic_s + self.policy.acknowledgement_s)
+            self._glucose_ack = _GlucoseAck(
+                self.state.glucose, self._mg_dl,
+                monotonic_s + self.policy.glucose_acknowledgement_s)
             self.state = replace(self.state, glucose_silenced=True)
 
     def acknowledge_faults(self, monotonic_s: float) -> None:
         if self.state.fault_audible:
             self._fault_ack = _FaultAck(self.state.faults,
-                                        monotonic_s + self.policy.acknowledgement_s)
+                                        monotonic_s + self.policy.fault_acknowledgement_s)
             self.state = replace(self.state, faults_silenced=True)
 
     def update(self, reading: Reading | None, *, now: datetime, monotonic_s: float,
                acquisition_ok: bool, clock_synchronized: bool,
-               heartbeat_age_s: float) -> State:
+               heartbeat_age_s: float, controller_faults: frozenset[Fault]) -> State:
         require_aware(now)
+        if not controller_faults <= CONTROLLER_FAULTS:
+            raise ValueError(f"unexpected controller faults: {set(controller_faults)}")
         p = self.policy
-        faults: set[Fault] = set()
+        faults: set[Fault] = set(controller_faults)
         mg_dl: float | None = None
         if not acquisition_ok:
             faults.add(Fault.ACQUISITION)

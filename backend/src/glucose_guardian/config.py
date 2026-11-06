@@ -9,6 +9,7 @@ from .alarms import Policy
 from .simulation import SCENARIOS
 
 PROVIDERS = frozenset({"simulated"})
+TRANSPORTS = frozenset({"simulated", "serial"})
 
 
 class ConfigError(ValueError):
@@ -25,11 +26,19 @@ class RuntimeSettings:
 
 
 @dataclass(frozen=True)
+class SerialSettings:
+    device: str
+    reconnect_initial_s: float
+    reconnect_max_s: float
+
+
+@dataclass(frozen=True)
 class Config:
     provider: str
     scenario: str
     policy: Policy
     runtime: RuntimeSettings
+    serial: SerialSettings | None
 
 
 def load_config(path: Path) -> Config:
@@ -44,8 +53,8 @@ def load_config(path: Path) -> Config:
 
 
 def _parse(data: dict[str, Any], source: str) -> Config:
-    _check_keys(data, {"provider", "alarm", "runtime", "simulation"}, {"hardware"}, "top level",
-                source)
+    _check_keys(data, {"provider", "alarm", "runtime", "simulation", "transport"}, {"hardware"},
+                "top level", source)
     provider = data["provider"]
     if provider not in PROVIDERS:
         raise ConfigError(f"{source}: provider must be one of {sorted(PROVIDERS)}; "
@@ -67,7 +76,35 @@ def _parse(data: dict[str, Any], source: str) -> Config:
     runtime = RuntimeSettings(**_numbers(_table(data, "runtime", source), RuntimeSettings,
                                          "[runtime]", source))
     _check_runtime(runtime, policy, source)
-    return Config(provider, simulation["scenario"], policy, runtime)
+    return Config(provider, simulation["scenario"], policy, runtime,
+                  _serial(_table(data, "transport", source), source))
+
+
+def _serial(transport: dict[str, Any], source: str) -> SerialSettings | None:
+    kind = transport.get("kind")
+    if kind not in TRANSPORTS:
+        raise ConfigError(f"{source}: [transport] kind must be one of {sorted(TRANSPORTS)}")
+    if kind == "simulated":
+        _check_keys(transport, {"kind"}, set(), "[transport]", source)
+        return None
+    _check_keys(transport, {"kind", "device", "reconnect_initial_s", "reconnect_max_s"}, set(),
+                "[transport]", source)
+    device = transport["device"]
+    if not isinstance(device, str) or not device:
+        raise ConfigError(f"{source}: [transport] device must be a non-empty string")
+    timing = {key: value for key, value in transport.items() if key.startswith("reconnect_")}
+    settings = SerialSettings(device, **_numbers(
+        timing, _ReconnectTiming, "[transport]", source))
+    if settings.reconnect_initial_s > settings.reconnect_max_s:
+        raise ConfigError(f"{source}: [transport] reconnect_initial_s must not exceed "
+                          "reconnect_max_s")
+    return settings
+
+
+@dataclass(frozen=True)
+class _ReconnectTiming:
+    reconnect_initial_s: float
+    reconnect_max_s: float
 
 
 def _check_runtime(runtime: RuntimeSettings, policy: Policy, source: str) -> None:

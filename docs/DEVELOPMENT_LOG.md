@@ -1,5 +1,144 @@
 # Development log
 
+## 2026-11-06 — M3 review fix: backoff across short-lived connections
+
+### Changes and decisions
+
+- Review finding (PR #5): every successful open reset the reconnect backoff, so a
+  device that opens but fails immediately was reopened every `reconnect_initial_s`,
+  resetting the Uno via DTR and writing its EEPROM boot counter each time.
+- The backoff now resets only when a connection fails after staying up for at least
+  `reconnect_max_s`; shorter connections keep doubling towards the cap. No new setting:
+  a connection that outlives the longest retry interval counts as stable.
+
+### Hardware and protocol record
+
+- Reconnect behavior updated in `docs/PROTOCOL.md` and `docs/ARCHITECTURE.md`. With the
+  example backoff (1 s to 30 s), a persistently failing device is reopened at most about
+  twice a minute.
+
+### Validation
+
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean, pytest 272 passed.
+- New regression tests: repeated successful opens each followed by an immediate write
+  or read failure retry at 0, 1, 3, 7, 11, 15 s (initial 1 s, cap 4 s); a connection
+  that lasted the cap resets the backoff and doubling restarts at 12, 14, 18 s.
+- Mutation check: restoring reset-on-open, never resetting, and a zero stability
+  threshold each fail the suite.
+- Firmware unchanged.
+
+## 2026-11-06 — M3 review fix: incomplete serial writes
+
+### Changes and decisions
+
+- Review finding (PR #5): `SerialTransport.send()` ignored the byte count returned by
+  pyserial's non-blocking `write()`. Reproduced against pyserial 3.5 on a pseudo-terminal:
+  after 820 complete frames a write returned 12 of 26 bytes without raising.
+- A second defect found while reproducing: with a completely full buffer, pyserial's
+  `write()` retries `EAGAIN` in a loop and never returns, which would have frozen the
+  supervisory loop.
+- New `PyserialPort` adapter: a zero-timeout `select` guard returns 0 instead of
+  calling pyserial when there is no room; `discard_output()` maps `termios.error` to
+  `SerialException`. The transport depends on a small `Port` protocol.
+- Any zero, partial or failed write is a failed transmission: counted
+  (`incomplete_writes` / `failed_writes`), unsent output discarded, port closed,
+  reconnect with backoff. A write timeout now also reconnects instead of only being
+  counted.
+- `Link.next_seq()` only allocates; `Link.sent()` records the send time after a
+  complete write, so a failed frame can never be acknowledged into liveness.
+- Alarm policy, acknowledgement semantics, protocol format and firmware behavior
+  unchanged; the firmware gained a test for a truncated frame joined with the next one.
+
+### Hardware and protocol record
+
+- Pi transmit-failure handling added to `docs/PROTOCOL.md`; the bench checklist gained
+  a stalled-device close check.
+
+### Validation
+
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean, pytest 269 passed. The
+  serial transport tests passed 20 consecutive runs.
+- Firmware: `pio test -e native` 23 of 23; `pio run -e uno` unchanged at 382 B RAM and
+  3534 B flash.
+- Mutation check: eight deliberate defects in the fix each fail the suite. Removing the
+  `select` guard initially went undetected, because the transport test disconnects on
+  the first partial write before the spin can occur; a direct adapter test now
+  catches it in 2 s.
+
+### Unresolved issues
+
+- Whether `close()` on a stalled real USB-serial device returns promptly after the
+  output discard needs bench validation.
+- Persistent incomplete writes cause a reconnect, and therefore a DTR reset and EEPROM
+  boot-counter write, per backoff interval.
+
+## 2026-11-06 — M3 serial protocol v1
+
+### Changes and decisions
+
+- Owner decisions:
+  - separate `glucose_acknowledgement_s` and `fault_acknowledgement_s`, each capped
+    at 900 s;
+  - a short press silences glucose only, and the display shows "Hold 2 s to silence"
+    when only faults sound;
+  - the Uno's standalone link-lost silence lasts at most 60 s, re-arms automatically
+    and cannot be extended;
+  - timings: 50 ms debounce, 2 s long press, 30 s stuck, 2 s watchdog, 10 s grace;
+  - pyserial for the byte transport;
+  - PC-only: no pins, outputs or flashing.
+- Superseded M2 decision: a press no longer silences both channels.
+- Protocol v1 (`docs/PROTOCOL.md`, new): CRC-16/CCITT-FALSE ASCII frames of at most
+  64 bytes with `GG1` version, Pi session and sequence, and Uno boot counter and
+  sequence. The state frame is the heartbeat. Button presses travel as cumulative
+  counters so a lost report loses no press.
+- Pi: new `protocol.py` (pure framing and validation), `link.py` (pure link state:
+  ack window of 16, round-trip liveness, duplicate and replay rejection, reset
+  detection, counter deltas) and `serial_transport.py` (pyserial, bounded reads,
+  non-blocking writes, exponential backoff). The `AlarmTransport` protocol became
+  `receive()` / `send(state, monotonic_s)`.
+- Alarm engine: `update()` takes the required `controller_faults` argument; new faults
+  `controller_reset` (latched by the runtime until a long press, the one fault a press
+  clears because it is an event) and `button_stuck`.
+- Firmware: `lib/guardian/` (protocol, `PiLink`, `Button`, reset cause, `Controller`)
+  in C++11 without Arduino headers or the STL, with 22 native Unity tests sharing frame
+  vectors with Python. `main.cpp` captures reset flags in `.init3`, enables the 2 s
+  watchdog, increments an EEPROM boot counter and computes the alarm demand without
+  driving pins. A stuck press never acknowledges anything; long presses are
+  classified on release.
+- A classification bug was found by the cross-language tests and fixed on both sides:
+  a body of just `GG1` had been reported as a version mismatch instead of malformed.
+- Configuration: required `[transport]` table (`kind = "simulated"`, or `"serial"`
+  with `device` and reconnect timing). `pyserial==3.5` became the first runtime
+  dependency; `types-pyserial` joined the lint extra.
+- CI: the firmware job builds `-e uno` and runs `pio test -e native`.
+
+### Hardware and protocol record
+
+- Serial protocol replaced: the initial scaffold's one-character `H`/`N`/`G`/`F` bench
+  protocol is gone; v1 is specified in `docs/PROTOCOL.md`.
+- Provisional firmware timing recorded in `docs/HARDWARE.md`. No GPIO assignment; the
+  button input is fixed at released. EEPROM address 0 holds the boot counter.
+- Opening the port resets the Uno via DTR; the stock Optiboot bootloader may hide the
+  reset cause, so resets are detected by the boot counter.
+
+### Validation
+
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean (16 files), pytest 257
+  passed.
+- Firmware: `pio test -e native` 22 of 22 passed with `-Wall -Wextra -Werror
+  -pedantic`; `pio run -e uno` succeeded at 382 B RAM and 3534 B flash.
+- Mutation check: 18 Python and 12 firmware deliberate defects each made the
+  suite fail.
+- Not validated: anything on a physical Uno (PC-only by owner decision).
+
+### Unresolved issues
+
+- Bench validation of the watchdog reset, reset causes, serial timing and DTR
+  behavior (needs approval).
+- The heartbeat timeout is defined separately on the Pi (`heartbeat_timeout_s`) and
+  the Uno (5 s constant).
+- Restart persistence of the retained alarm level (M6).
+
 ## 2026-11-06 — M2 simulated end-to-end runtime
 
 ### Changes and decisions

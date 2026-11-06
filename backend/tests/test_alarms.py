@@ -18,9 +18,11 @@ from glucose_guardian.providers import Reading, SimulatedProvider
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 POLICY = Policy(urgent_low_mg_dl=55, low_mg_dl=70, high_mg_dl=250, hysteresis_mg_dl=5,
                 rearm_mg_dl=10, max_age_s=600, max_future_skew_s=60,
-                heartbeat_timeout_s=5, acknowledgement_s=60)
+                heartbeat_timeout_s=5, glucose_acknowledgement_s=60,
+                fault_acknowledgement_s=60)
 HEALTHY = {"mg_dl": 110, "age_s": 0, "tick": 0, "heartbeat_s": 0,
-           "acquisition_ok": True, "clock_ok": True, "missing": False}
+           "acquisition_ok": True, "clock_ok": True, "missing": False,
+           "controller": frozenset()}
 
 U, L, N, H, X = (GlucoseLevel.URGENT_LOW, GlucoseLevel.LOW, GlucoseLevel.NORMAL,
                  GlucoseLevel.HIGH, GlucoseLevel.UNKNOWN)
@@ -37,7 +39,8 @@ def step(machine, **changes):
     reading = None if i["missing"] else Reading(i["mg_dl"], NOW - timedelta(seconds=i["age_s"]))
     return machine.update(reading, now=NOW, monotonic_s=i["tick"],
                           acquisition_ok=i["acquisition_ok"],
-                          clock_synchronized=i["clock_ok"], heartbeat_age_s=i["heartbeat_s"])
+                          clock_synchronized=i["clock_ok"], heartbeat_age_s=i["heartbeat_s"],
+                          controller_faults=i["controller"])
 
 
 def test_startup_is_unknown_and_faulted(machine):
@@ -242,7 +245,7 @@ def test_cleared_faults_end_fault_event(machine):
 
 def test_acknowledgement_cap_is_fifteen_minutes():
     assert MAX_ACKNOWLEDGEMENT_S == 900
-    machine = AlarmMachine(Policy(**{**asdict(POLICY), "acknowledgement_s": 900}))
+    machine = AlarmMachine(Policy(**{**asdict(POLICY), "glucose_acknowledgement_s": 900}))
     step(machine, mg_dl=50)
     machine.acknowledge_glucose(0)
     assert step(machine, mg_dl=50, tick=899.999).glucose_silenced
@@ -254,7 +257,9 @@ def test_acknowledgement_cap_is_fifteen_minutes():
     {"high_mg_dl": 70},
     {"hysteresis_mg_dl": 16},
     {"high_mg_dl": 80},
-    {"acknowledgement_s": 901},
+    {"glucose_acknowledgement_s": 901},
+    {"fault_acknowledgement_s": 901},
+    {"fault_acknowledgement_s": 0},
     {"rearm_mg_dl": float("nan")},
     {"max_future_skew_s": 0},
     {"hysteresis_mg_dl": -1},
@@ -273,7 +278,8 @@ def test_example_config_is_a_valid_policy():
 def test_naive_now_raises(machine):
     with pytest.raises(ValueError):
         machine.update(Reading(110, NOW), now=NOW.replace(tzinfo=None), monotonic_s=0,
-                       acquisition_ok=True, clock_synchronized=True, heartbeat_age_s=0)
+                       acquisition_ok=True, clock_synchronized=True, heartbeat_age_s=0,
+                       controller_faults=frozenset())
 
 
 def test_randomised_invariants():
@@ -302,9 +308,9 @@ def test_randomised_invariants():
             clock_ok=rng.random() < 0.95,
             missing=rng.random() < 0.05)
         if state.glucose_silenced:
-            assert tick - glucose_ack_at < POLICY.acknowledgement_s <= MAX_ACKNOWLEDGEMENT_S
+            assert tick - glucose_ack_at < POLICY.glucose_acknowledgement_s <= MAX_ACKNOWLEDGEMENT_S
         if state.faults_silenced:
-            assert tick - fault_ack_at < POLICY.acknowledgement_s
+            assert tick - fault_ack_at < POLICY.fault_acknowledgement_s
         if state.faults - previous.faults:
             assert state.fault_audible
         if previous.glucose in (N, X) and state.glucose in (U, L, H):

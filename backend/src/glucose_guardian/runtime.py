@@ -5,11 +5,11 @@ from collections import Counter
 from collections.abc import Callable
 from datetime import datetime
 
-from .alarms import AlarmMachine, Policy, State
+from .alarms import AlarmMachine, Fault, Policy, State
 from .config import RuntimeSettings
 from .display import Display, Frame, build_frame
 from .providers import GlucoseProvider, Reading
-from .transport import AlarmTransport
+from .transport import LINK_DOWN, AlarmTransport, Inbound
 from .worker import BoundedWorker, Done, Spawn, TimedOut
 
 log = logging.getLogger(__name__)
@@ -39,6 +39,7 @@ class Runtime:
         self._last_valid: Reading | None = None
         self._acquisition_ok = True
         self._clock_synchronized = False
+        self._reset_latched = False
 
     def run(self, wait: Callable[[float], bool]) -> None:
         deadline_s = self._monotonic()
@@ -57,19 +58,24 @@ class Runtime:
         now = self._wall_clock()
         monotonic_s = self._monotonic()
         self.counts["ticks"] += 1
-        if self._button_presses() > 0:
-            self.machine.acknowledge_glucose(monotonic_s)
-            self.machine.acknowledge_faults(monotonic_s)
+        inbound = self._receive(monotonic_s)
+        self._acknowledge(inbound, monotonic_s)
         self._poll_acquisition(now, monotonic_s)
         self._poll_clock(monotonic_s)
+        controller_faults = set()
+        if self._reset_latched:
+            controller_faults.add(Fault.CONTROLLER_RESET)
+        if inbound.button_stuck:
+            controller_faults.add(Fault.BUTTON_STUCK)
         state = self.machine.update(
             self._latest, now=now, monotonic_s=monotonic_s,
             acquisition_ok=self._acquisition_ok,
             clock_synchronized=self._clock_synchronized,
-            heartbeat_age_s=self._heartbeat_age(monotonic_s))
+            heartbeat_age_s=inbound.link_age_s,
+            controller_faults=frozenset(controller_faults))
         if state.glucose_current:
             self._last_valid = self._latest
-        self._send(state)
+        self._send(state, monotonic_s)
         self._render(build_frame(state, self._last_valid, now))
         return state
 
@@ -94,23 +100,27 @@ class Runtime:
             self.counts["clock_check_failures"] += 1
             log.warning("clock check failed: %s", outcome)
 
-    def _button_presses(self) -> int:
+    def _acknowledge(self, inbound: Inbound, monotonic_s: float) -> None:
+        if inbound.unexpected_reset:
+            self._reset_latched = True
+            log.warning("unexpected controller reset")
+        if inbound.short_presses:
+            self.machine.acknowledge_glucose(monotonic_s)
+        if inbound.long_presses:
+            self.machine.acknowledge_faults(monotonic_s)
+            if Fault.CONTROLLER_RESET in self.machine.state.faults:
+                self._reset_latched = False
+
+    def _receive(self, monotonic_s: float) -> Inbound:
         try:
-            return self._transport.take_button_presses()
+            return self._transport.receive(monotonic_s)
         except Exception as error:
             self._adapter_error("transport", error)
-            return 0
+            return LINK_DOWN
 
-    def _heartbeat_age(self, monotonic_s: float) -> float:
+    def _send(self, state: State, monotonic_s: float) -> None:
         try:
-            return self._transport.heartbeat_age(monotonic_s)
-        except Exception as error:
-            self._adapter_error("transport", error)
-            return math.inf
-
-    def _send(self, state: State) -> None:
-        try:
-            self._transport.send(state)
+            self._transport.send(state, monotonic_s)
         except Exception as error:
             self._adapter_error("transport", error)
 
