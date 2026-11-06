@@ -1,10 +1,11 @@
 import logging
 from datetime import timedelta
 
+import pytest
 from harness import NOW
 
 from glucose_guardian.alarms import Fault, GlucoseLevel, State
-from glucose_guardian.display import LogDisplay, build_frame
+from glucose_guardian.display import HOLD_PROMPT, LogDisplay, build_frame
 from glucose_guardian.providers import Reading
 
 CURRENT = State(GlucoseLevel.NORMAL, True, frozenset(), False, False)
@@ -24,6 +25,18 @@ def test_stale_frame_is_last_known_with_age_and_sorted_faults():
         GlucoseLevel.URGENT_LOW, 50, True, 720.0)
     assert frame.faults == (Fault.COMMUNICATION, Fault.MISSING_DATA)
     assert frame.glucose_audible and frame.fault_audible
+
+
+@pytest.mark.parametrize("state,prompt", [
+    (STALE, None),
+    (State(GlucoseLevel.URGENT_LOW, False, frozenset({Fault.MISSING_DATA}), True, False),
+     HOLD_PROMPT),
+    (State(GlucoseLevel.UNKNOWN, False, frozenset({Fault.CLOCK}), False, False), HOLD_PROMPT),
+    (State(GlucoseLevel.UNKNOWN, False, frozenset({Fault.CLOCK}), False, True), None),
+    (CURRENT, None),
+])
+def test_hold_prompt_only_when_faults_alone_are_sounding(state, prompt):
+    assert build_frame(state, None, NOW).prompt == prompt
 
 
 def test_frame_without_any_reading():
