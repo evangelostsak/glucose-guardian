@@ -32,7 +32,9 @@ M3 serial protocol v1 is complete on `feat/m3-serial-protocol`, PC-only:
   faults are sounding. `glucose_acknowledgement_s` and `fault_acknowledgement_s` are
   separate settings, each capped at 900 s.
 - **Pi serial transport** on pyserial 3.5: bounded reads (1024 bytes per tick, 63-byte
-  lines), non-blocking writes, reconnect with exponential backoff.
+  lines), writes guarded so a full buffer never blocks, and every zero, partial or
+  failed write treated as a failed transmission (discard output, close, reconnect with
+  exponential backoff).
 - **Firmware rework** into a testable C++ library:
   - startup grace (10 s) and heartbeat timeout (5 s), latched so a `millis()` wrap
     cannot clear it;
@@ -41,8 +43,8 @@ M3 serial protocol v1 is complete on `feat/m3-serial-protocol`, PC-only:
   - button debounce (50 ms), long press (2 s) and stuck detection (30 s);
   - a 2 s hardware watchdog, an EEPROM boot counter and reset-cause capture.
   No pins are assigned and no outputs are driven.
-- **Tests:** 257 Python tests (including real pyserial over pseudo-terminals against a
-  Python Uno emulator) and 22 native firmware tests, with shared frame vectors.
+- **Tests:** 269 Python tests (including real pyserial over pseudo-terminals against a
+  Python Uno emulator) and 23 native firmware tests, with shared frame vectors.
 
 This resolves audit findings H3, H6, M1, M7, L3 and L4.
 
