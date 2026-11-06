@@ -44,14 +44,16 @@ class Link:
         self._sent.clear()
         self.button_stuck = False
 
-    def next_seq(self, monotonic_s: float) -> int:
+    def next_seq(self) -> int:
         seq = self._next_seq
         self._next_seq = (seq + 1) % SEQ_MODULUS
+        return seq
+
+    def sent(self, seq: int, monotonic_s: float) -> None:
         self._sent.pop(seq, None)
         self._sent[seq] = monotonic_s
         while len(self._sent) > ACK_WINDOW:
             self._sent.popitem(last=False)
-        return seq
 
     def age_s(self, monotonic_s: float) -> float:
         return monotonic_s - self._acked_at_s
