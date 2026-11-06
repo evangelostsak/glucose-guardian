@@ -293,6 +293,24 @@ void test_controller_replies_to_new_state_frames_only() {
   TEST_ASSERT_FALSE(demand.fault);
 }
 
+void test_controller_rejects_truncated_frame_joined_with_next() {
+  const uint8_t cuts[] = {sizeof(kStateVector) - 1, 10};
+  for (uint8_t cut : cuts) {
+    Controller controller;
+    controller.begin(0x00A1, 'E', 0);
+    char reply[kMaxFrameBytes];
+    for (uint8_t i = 0; i < cut; ++i) {
+      TEST_ASSERT_EQUAL_UINT8(0, controller.receive(static_cast<uint8_t>(kStateVector[i]), 100,
+                                                    reply));
+    }
+    TEST_ASSERT_EQUAL_UINT8(0, feedState(controller, 2, 200, reply));
+    TEST_ASSERT_EQUAL_UINT16(1, controller.rejectedFrames());
+    TEST_ASSERT_TRUE(controller.demand(kStartupGraceMs).linkLost);
+    TEST_ASSERT_TRUE(feedState(controller, 3, kStartupGraceMs + 100, reply) > 0);
+    TEST_ASSERT_FALSE(controller.demand(kStartupGraceMs + 100).linkLost);
+  }
+}
+
 void test_controller_link_loss_is_audible_without_the_pi() {
   Controller controller;
   controller.begin(1, 'P', 0);
@@ -370,6 +388,7 @@ int main() {
   RUN_TEST(test_stuck_button_reports_and_never_acknowledges);
   RUN_TEST(test_reset_cause_priority);
   RUN_TEST(test_controller_replies_to_new_state_frames_only);
+  RUN_TEST(test_controller_rejects_truncated_frame_joined_with_next);
   RUN_TEST(test_controller_link_loss_is_audible_without_the_pi);
   RUN_TEST(test_controller_corrupted_frames_do_not_keep_link_alive);
   RUN_TEST(test_controller_local_long_press_silences_for_sixty_seconds);
