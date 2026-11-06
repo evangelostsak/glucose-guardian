@@ -60,3 +60,6 @@ nothing connected to any output should confirm:
    the installed bootloader.
 4. RAM and stack headroom (static RAM is 382 of 2048 bytes) and loop timing under
    continuous traffic.
+5. With the Uno stalled or unplugged mid-write, an incomplete write leads to discard,
+   close and reconnect without blocking the Pi loop. In particular, `close()` must not
+   wait out the USB-serial driver's closing delay (`cdc_acm` closing wait).
