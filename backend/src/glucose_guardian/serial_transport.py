@@ -1,7 +1,10 @@
 """Linux serial transport for protocol v1; pyserial moves bytes only."""
 import logging
+import select
+import termios
 from collections import Counter
 from collections.abc import Callable
+from typing import Protocol
 
 import serial
 
@@ -15,11 +18,48 @@ log = logging.getLogger(__name__)
 BAUD_RATE = 115200
 MAX_READ_BYTES = 1024
 
-Opener = Callable[[str], serial.Serial]
+
+class Port(Protocol):
+    def read(self, size: int) -> bytes: ...
+    def write(self, data: bytes) -> int: ...
+    def discard_output(self) -> None: ...
+    def close(self) -> None: ...
 
 
-def open_serial(device: str) -> serial.Serial:
-    return serial.Serial(device, BAUD_RATE, timeout=0, write_timeout=0, exclusive=True)
+class IncompleteWrite(Exception):
+    pass
+
+
+class PyserialPort:
+    def __init__(self, port: serial.Serial) -> None:
+        self._port = port
+
+    def read(self, size: int) -> bytes:
+        return self._port.read(size)
+
+    def write(self, data: bytes) -> int:
+        _, writable, _ = select.select([], [self._port.fileno()], [], 0)
+        if not writable:
+            return 0
+        written = self._port.write(data)
+        return 0 if written is None else written
+
+    def discard_output(self) -> None:
+        try:
+            self._port.reset_output_buffer()
+        except termios.error as error:
+            raise serial.SerialException(f"discard failed: {error}") from error
+
+    def close(self) -> None:
+        self._port.close()
+
+
+Opener = Callable[[str], Port]
+
+
+def open_serial(device: str) -> PyserialPort:
+    return PyserialPort(serial.Serial(device, BAUD_RATE, timeout=0, write_timeout=0,
+                                      exclusive=True))
 
 
 class SerialTransport:
@@ -34,7 +74,7 @@ class SerialTransport:
         self._backoff_s = reconnect_initial_s
         self._next_attempt_s: float | None = None
         self._buffer = LineBuffer(MAX_LINE_BYTES)
-        self._port: serial.Serial | None = None
+        self._port: Port | None = None
 
     @property
     def connected(self) -> bool:
@@ -62,20 +102,27 @@ class SerialTransport:
         port = self._port
         if port is None:
             return
-        frame = encode_state(self.link.session, self.link.next_seq(monotonic_s), state)
+        seq = self.link.next_seq()
+        frame = encode_state(self.link.session, seq, state)
         try:
-            port.write(frame)
-        except serial.SerialTimeoutException:
-            self.counts["send_dropped"] += 1
+            written = port.write(frame)
         except (serial.SerialException, OSError) as error:
+            self.counts["failed_writes"] += 1
             self._lost(monotonic_s, error)
+            return
+        if written != len(frame):
+            self.counts["incomplete_writes"] += 1
+            self._lost(monotonic_s, IncompleteWrite(f"{written} of {len(frame)} bytes"))
+            return
+        self.link.sent(seq, monotonic_s)
+        self.counts["frames_sent"] += 1
 
     def close(self) -> None:
         if self._port is not None:
             self._port.close()
             self._port = None
 
-    def _ensure_open(self, monotonic_s: float) -> serial.Serial | None:
+    def _ensure_open(self, monotonic_s: float) -> Port | None:
         if self._port is not None:
             return self._port
         if self._next_attempt_s is not None and monotonic_s < self._next_attempt_s:
@@ -97,11 +144,17 @@ class SerialTransport:
 
     def _lost(self, monotonic_s: float, error: Exception) -> None:
         self.counts["disconnects"] += 1
-        log.warning("serial link lost: %s", type(error).__name__)
-        try:
-            self.close()
-        except (serial.SerialException, OSError):
-            self._port = None
+        log.warning("serial link lost: %s %s", type(error).__name__, error)
+        port, self._port = self._port, None
+        if port is not None:
+            try:
+                port.discard_output()
+            except (serial.SerialException, OSError):
+                self.counts["discard_failures"] += 1
+            try:
+                port.close()
+            except (serial.SerialException, OSError):
+                self.counts["close_failures"] += 1
         self._schedule_retry(monotonic_s)
 
     def _schedule_retry(self, monotonic_s: float) -> None:
