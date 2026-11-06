@@ -233,8 +233,11 @@ calling pyserial when a zero-timeout `select` reports no room; pyserial would
 otherwise spin on a full buffer. A frame's sequence enters the acknowledgement window
 only after a complete write. A zero, partial or failed write, an open failure or an
 I/O error discards unsent output, closes the port and schedules a retry with
-exponential backoff between `reconnect_initial_s` and `reconnect_max_s`; a successful
-open resets the backoff and starts a new initial connection. See "Transmit failures"
+exponential backoff between `reconnect_initial_s` and `reconnect_max_s`. A successful
+open starts a new initial connection but does not reset the backoff: it returns to
+`reconnect_initial_s` only when a connection fails after staying up for at least
+`reconnect_max_s`. Repeated short-lived connections therefore keep backing off, which
+also bounds DTR resets of the Uno and its EEPROM boot-counter writes. See "Transmit failures"
 in [PROTOCOL.md](PROTOCOL.md). Tests exercise the real pyserial
 path over pseudo-terminals against a Python Uno emulator.
 
