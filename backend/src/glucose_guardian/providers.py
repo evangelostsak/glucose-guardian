@@ -11,7 +11,7 @@ class Reading:
 
 
 class GlucoseProvider(Protocol):
-    def read(self, now: datetime) -> Reading: ...
+    def read(self, now: datetime) -> Reading | None: ...
 
 
 class SimulatedProvider:

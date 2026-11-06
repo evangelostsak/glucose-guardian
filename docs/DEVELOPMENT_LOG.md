@@ -1,5 +1,62 @@
 # Development log
 
+## 2026-11-06 — M2 simulated end-to-end runtime
+
+### Changes and decisions
+
+- New modules: `worker.py` (bounded jobs), `clock.py` (timedatectl check), `config.py`
+  (strict TOML), `simulation.py` (scenarios), `runtime.py` (supervisory loop),
+  `service.py` (simulated entry point). `display.py` gained the `Frame` model,
+  `LogDisplay` and `MemoryDisplay`; `transport.py` gained `take_button_presses()` and
+  `SimulatedTransport`; `GlucoseProvider.read` may return `None` (no new reading).
+- Workers use daemon threads with one job in flight. Threads cannot be killed, so a
+  timed-out job keeps its slot until it returns and its late result is discarded;
+  this bounds threads to one per worker and lets the process exit with a hung fetch.
+  `ThreadPoolExecutor` was rejected because its threads are joined at interpreter
+  exit, so a hung fetch would block shutdown.
+- The clock check runs in its own bounded worker so a slow `timedatectl` cannot
+  stall a tick. Unknown, failed or timed-out checks mean untrusted; the clock starts
+  untrusted. `acquisition_ok` starts true because nothing has failed yet and missing
+  data is already a fault.
+- Display and transport exceptions are counted and survived so alarm evaluation
+  continues; a heartbeat query failure counts as infinite age. Engine defects
+  propagate and the service exits with status 1.
+- Configuration: every value is required; the only default is the fail-safe one (a
+  missing `[hardware]` table means outputs disabled, and `true` is rejected). Runtime
+  cross-checks keep the tick below the heartbeat timeout and fetches inside the data
+  age limit. `provider` accepts only `"simulated"`.
+- Logs contain levels and fault names, never glucose values.
+- Owner M3 decision: a short button press acknowledges both audible channels
+  independently. Implemented in the runtime via `take_button_presses()`; debounce and
+  the serial event protocol stay in M3.
+- The M1 alarm policy is unchanged; no defect required a correction.
+
+### Hardware and protocol record
+
+- No changes to hardware assumptions, GPIO mappings or the serial protocol. The
+  transport boundary gained button-press intake; the simulated transport opens no
+  serial port. Stopping the service stops heartbeats, which the Uno will treat as a
+  communication fault.
+
+### Validation
+
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean (13 files), pytest 156
+  passed. The thread and subprocess tests passed 30 consecutive runs.
+- Mutation check: thirteen deliberate defects each made the suite fail. One mutation
+  (clock trusted before the first check) initially survived and gained a test.
+- Service smoke runs (`normal`, `missing_data`, `clock_failure`): correct state logs,
+  exit 0 on SIGTERM, exit 2 on a missing config. With five fetches and five clock
+  checks per second, RSS held at about 21 MB with one live thread over 160 ticks.
+- `pio run`: success, firmware unchanged.
+
+### Unresolved issues
+
+- Restart forgets a retained alarm level during stale data (M6 persistence).
+- The `timedatectl` check is unit-tested only; it must be validated on Debian 13 on
+  the Pi.
+- Button debounce and event protocol, Uno-reported faults, heartbeat as a state frame
+  (M3).
+
 ## 2026-11-06 — M1 alarm policy v2
 
 ### Changes and decisions

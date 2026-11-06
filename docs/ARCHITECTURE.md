@@ -2,18 +2,28 @@
 
 The Pi owns acquisition, timestamp validation, deterministic glucose policy, HDMI
 display, and USB transport. The Uno independently watches Pi heartbeats and will
-request a distinct system fault on startup or heartbeat loss. A future systemd
-runtime must supervise the Pi process. The supplied unit is only a template and
-references a service module that is deliberately not implemented yet.
+request a distinct system fault on startup or heartbeat loss. systemd will supervise
+the Pi process (M6); the supplied unit is an uninstalled template.
 
-`providers.py` defines immutable readings and a provider boundary. The simulator
-cycles synthetic values using an injected UTC clock. `validation.py` checks a
-reading's value and timestamp. `alarms.py` holds the alarm policy. It takes the
-latest reading, UTC time, monotonic time, acquisition status, clock synchronization
-status and heartbeat age, all as required arguments, and performs no I/O. Every call
-re-evaluates data age and heartbeat age, so a fixed-rate runtime loop (M2) detects
-faults independently of when readings arrive. `display.py` and `transport.py` define
-future adapters. There is no Dexcom adapter.
+| Module | Responsibility |
+|---|---|
+| `providers.py` | Immutable `Reading` and the `GlucoseProvider` boundary (`read(now) -> Reading \| None`) |
+| `validation.py` | Reading value and timestamp checks |
+| `alarms.py` | Pure alarm policy; no I/O |
+| `worker.py` | Bounded background jobs with hard timeouts |
+| `clock.py` | Wall-clock synchronization check |
+| `config.py` | Strict TOML configuration loading |
+| `simulation.py` | Deterministic synthetic scenarios and their provider |
+| `display.py` | Display frame model, log display, in-memory display double |
+| `transport.py` | Transport boundary and simulated transport double |
+| `runtime.py` | Fixed-rate supervisory loop wiring the above |
+| `service.py` | Simulated runtime entry point |
+
+`alarms.py` takes the latest reading, UTC time, monotonic time, acquisition status,
+clock synchronization status and heartbeat age, all as required arguments. Every call
+re-evaluates data age and heartbeat age, so the fixed-rate runtime detects faults
+independently of when readings arrive. There is no Dexcom adapter, serial adapter or
+GUI yet.
 
 ## Reading validation
 
@@ -71,8 +81,14 @@ event, so the next one alarms.
 
 A fault acknowledgement covers only the faults active when it was given and shrinks
 as they clear. Any fault outside that set, including one that cleared and returned,
-sounds immediately; an empty fault set ends the event. How the single physical
-button maps to the two channels is decided with the serial protocol (M3).
+sounds immediately; an empty fault set ends the event.
+
+A short press of the single physical button acknowledges both currently audible
+channels independently (owner decision for M3): it calls `acknowledge_glucose` and
+`acknowledge_faults`, each of which only acts on an audible channel. A press never
+clears an active fault, never extends past the 15-minute cap, and never silences a
+later new or escalating event. Debounce and the button event protocol belong to M3.
+In M2 presses arrive through `AlarmTransport.take_button_presses()`.
 
 ## Policy values
 
@@ -80,8 +96,110 @@ All policy values are required and validated when `Policy` is constructed: finit
 positive; `urgent_low < low < high`; `urgent_low + hysteresis <= low`;
 `low + hysteresis < high - hysteresis`; `acknowledgement_s <= 900`. No clinical
 values are embedded in code. `config/example.toml` and the tests use synthetic
-values. Personal values belong in the git-ignored `config/local.toml` once
-configuration loading exists (M2).
+values; personal values belong in the git-ignored `config/local.toml`.
+
+## Runtime
+
+`Runtime.tick()` runs once per `tick_s` and never blocks on I/O:
+
+1. Take button presses from the transport and acknowledge both audible channels.
+2. Poll the acquisition worker and the clock-check worker.
+3. Evaluate the alarm engine with the latest reading, acquisition status, clock
+   status and the transport's heartbeat age.
+4. Send the state to the transport and render a display frame.
+
+`Runtime.run(wait)` schedules ticks on monotonic deadlines (`deadline += tick_s`), so
+tick duration does not accumulate drift. An overrunning tick skips the missed slots,
+counts them in `counts["overruns"]`, and the next tick starts on the schedule grid.
+`wait` is `threading.Event.wait` in the service, so a stop request interrupts the
+sleep.
+
+### Bounded workers
+
+Acquisition and the clock check each run in a `BoundedWorker`. A job starts every
+interval with at most one job in flight. A job still running after its hard timeout
+is reported as `TimedOut` once and keeps its slot until it returns; its late result
+is discarded and no further job starts meanwhile. A permanently hung fetch therefore
+costs exactly one daemon thread and never blocks the supervisor or process exit.
+Exceptions inside a job, and a failure to start a thread, become `Failed`.
+
+| Worker result | Acquisition | Clock |
+|---|---|---|
+| `Done(reading)` | latest reading replaced; `acquisition_ok` true | `Done(True)`: synchronized |
+| `Done(None)` | no new reading; latest kept and ages towards stale | `Done(False)`: unsynchronized |
+| `Failed`, `TimedOut` | `acquisition_ok` false | unsynchronized |
+
+At startup `acquisition_ok` is true (nothing has failed yet; missing data is already a
+fault) and the clock is untrusted until its first check completes.
+
+### Clock check
+
+`systemd_clock_synchronized` runs `timedatectl show --property=NTPSynchronized
+--value` with a timeout. Only exit status 0 with output `yes` counts as synchronized;
+any error, timeout or other output means untrusted. The simulated service takes clock
+status from the scenario instead; the systemd check is wired to the real runtime in
+M4/M6 and must be validated on Debian 13 on the Pi.
+
+### Adapter failures and crashes
+
+Display and transport exceptions are caught, counted (`display_errors`,
+`transport_errors`) and logged by exception type only; alarm evaluation continues. A
+failing heartbeat query counts as an infinite heartbeat age, raising a communication
+fault. Provider and clock-check exceptions become worker failures. Any other exception,
+such as an alarm-engine defect, propagates out of `run()`: the service logs it and
+exits with status 1 for systemd to restart (M6). The Uno heartbeat watchdog covers
+the gap.
+
+### Restart
+
+State is not persisted. A restarted runtime begins with unknown glucose and a
+missing-data fault, forgets any acknowledgement, and re-alarms. It also forgets a
+retained alarm level: after a restart during stale data, glucose is unknown (with the
+missing-data fault sounding) rather than the last urgent low. Persisting the retained
+level is an open M6 item.
+
+## Configuration
+
+`load_config(path)` reads TOML strictly: unknown keys and missing keys are errors that
+name the file and key, numbers must be finite and positive (booleans and strings are
+rejected), and `[alarm]` builds a validated `Policy`.
+
+| Table | Keys |
+|---|---|
+| top level | `provider` (only `"simulated"` until M4) |
+| `[alarm]` | the nine `Policy` fields |
+| `[runtime]` | `tick_s`, `fetch_interval_s`, `fetch_timeout_s`, `clock_check_interval_s`, `clock_check_timeout_s` |
+| `[simulation]` | `scenario` (a name from `SCENARIOS`) |
+| `[hardware]` | optional; `outputs_enabled` may only be `false` |
+
+The only default is the fail-safe one: a missing `[hardware]` table means outputs
+disabled. Cross-checks: `tick_s < heartbeat_timeout_s`, `fetch_timeout_s <=
+fetch_interval_s`, `fetch_interval_s < max_age_s`, `clock_check_timeout_s <=
+clock_check_interval_s`. The file holds no credentials; unknown keys such as
+`password` are rejected, and Dexcom credentials will use systemd credentials (M4).
+
+## Simulation
+
+`SCENARIOS` holds deterministic, synthetic scenarios: `normal`, `hypoglycemia`,
+`hyperglycemia`, `stale_data`, `missing_data`, `invalid_readings`,
+`acquisition_timeout`, `acquisition_errors`, `clock_failure`, `communication_loss` and
+`simultaneous_faults`. Each is a list of segments giving the reading value (or none),
+whether reading timestamps are frozen (stale data), the fetch behavior (ok, error,
+hang), clock status and heartbeat status. The last segment persists.
+
+`ScenarioProvider` serves readings from the scenario. In the service, a hang segment
+blocks the fetch thread until the segment ends. Tests drive the runtime with fake
+monotonic and wall clocks and model a hang by holding the fetch job until the hang
+segment ends, which keeps every scenario deterministic.
+
+## Service
+
+`python -m glucose_guardian.service --config <file>` runs the configured scenario in
+real time with daemon-thread workers, a log display and the simulated transport. It
+stops on SIGTERM or SIGINT and restores the previous signal handlers. Exit status: 0
+stopped, 1 crashed, 2 configuration error. Logs contain levels and fault names, never
+glucose values. Stopping the service stops heartbeats, which the Uno will treat as a
+communication fault; a planned stop is not silent.
 
 ## Serial protocol
 
