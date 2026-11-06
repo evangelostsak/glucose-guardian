@@ -73,6 +73,7 @@ class SerialTransport:
         self._max_s = reconnect_max_s
         self._backoff_s = reconnect_initial_s
         self._next_attempt_s: float | None = None
+        self._opened_at_s: float | None = None
         self._buffer = LineBuffer(MAX_LINE_BYTES)
         self._port: Port | None = None
 
@@ -134,7 +135,7 @@ class SerialTransport:
             self._schedule_retry(monotonic_s)
             log.warning("serial open failed: %s", type(error).__name__)
             return None
-        self._backoff_s = self._initial_s
+        self._opened_at_s = monotonic_s
         self._next_attempt_s = None
         self._buffer.reset()
         self.link.connection_opened()
@@ -146,6 +147,9 @@ class SerialTransport:
         self.counts["disconnects"] += 1
         log.warning("serial link lost: %s %s", type(error).__name__, error)
         port, self._port = self._port, None
+        if self._opened_at_s is not None and monotonic_s - self._opened_at_s >= self._max_s:
+            self._backoff_s = self._initial_s
+        self._opened_at_s = None
         if port is not None:
             try:
                 port.discard_output()
