@@ -80,6 +80,27 @@ GG1 R 00A1 0002 7F3A 0001 E 00 03 01*505C
   measures round-trip age, not receive time. A late ack of an older frame never
   reduces liveness.
 
+## Transmit failures
+
+The Pi writes a state frame only when the port reports room (zero-timeout `select`)
+and never retries within a tick. pyserial's non-blocking `write()` returns a partial
+count without raising, and spins on `EAGAIN` when the buffer is completely full, so
+the transport never calls it on a full buffer.
+
+A write that is zero-length, partial or raises counts as a failed transmission:
+
+1. The frame's sequence number never enters the acknowledgement window, so no reply
+   can refresh liveness for it.
+2. Unsent output is discarded (`TCOFLUSH`), so neither the truncated tail nor older
+   queued frames reach the Uno later. This also keeps `close()` from waiting for the
+   buffer to drain.
+3. The port is closed and reopened with the reconnect backoff. Reopening resets the
+   Uno via DTR, clearing any partial line it holds.
+
+If no reset occurs, the Uno appends the next frame to the truncated one, the combined
+line fails its checksum, and it is rejected without refreshing liveness. The frame
+after it is accepted.
+
 ## Connection, reset and reconnection
 
 | Situation | Pi behavior |
