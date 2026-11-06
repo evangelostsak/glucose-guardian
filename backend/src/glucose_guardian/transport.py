@@ -1,5 +1,6 @@
 """Hardware boundary. No serial device is opened by this scaffold."""
 from typing import Protocol
+
 from .alarms import State
 
 
