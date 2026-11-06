@@ -24,32 +24,36 @@ cp ../config/example.toml ../config/local.toml
 
 The demo prints four synthetic readings and exits. The service runs the simulated
 runtime with the scenario named in `[simulation]` until SIGTERM or Ctrl+C; it logs
-alarm and fault changes, never glucose values. Neither accesses Dexcom, opens serial
-ports or drives outputs. `config/local.toml` is git-ignored. All example thresholds
-are synthetic test values, not clinical recommendations.
+alarm and fault changes, never glucose values. Neither accesses Dexcom or drives
+outputs, and the service opens a serial port only when `[transport] kind = "serial"`
+is configured. `config/local.toml` is git-ignored. All example thresholds are
+synthetic test values, not clinical recommendations.
 
 ```sh
 python3 -m pip install platformio==6.1.18
-pio run --project-dir firmware/arduino-uno
+pio run --project-dir firmware/arduino-uno -e uno
+pio test --project-dir firmware/arduino-uno -e native
 ```
 
-CI runs ruff, mypy and pytest on Python 3.11 and 3.13, and compiles Uno firmware.
-No hardware test is implied.
+CI runs ruff, mypy and pytest on Python 3.11 and 3.13, compiles the Uno firmware, and
+runs the firmware unit tests natively. No hardware test is implied; no Uno has been
+flashed with this firmware.
 
 ## Layout
 
 - `backend/`: Python package: alarm policy, simulated runtime, scenarios,
   display/transport boundaries and doubles, and pytest tests.
-- `firmware/arduino-uno/`: PlatformIO bench protocol and heartbeat detection;
-  outputs disabled and button handling deferred.
+- `firmware/arduino-uno/`: PlatformIO firmware: protocol v1, link supervision,
+  button classification and watchdog; no pins assigned and outputs disabled.
 - `config/example.toml`: secret-free example settings.
 - `deployment/systemd/`: inactive, uninstalled service template (M6).
-- `docs/`: [architecture](docs/ARCHITECTURE.md), [safety](docs/SAFETY.md),
-  and [electrical interface](docs/HARDWARE.md).
+- `docs/`: [architecture](docs/ARCHITECTURE.md), [serial protocol](docs/PROTOCOL.md),
+  [safety](docs/SAFETY.md), and [electrical interface](docs/HARDWARE.md).
 
-Before hardware use, implement and validate the serial adapter, physical button,
-actuator drivers, GUI, Dexcom acquisition, and systemd supervision. No real credentials or patient data belong in this repository. Nothing
-in this scaffold has been deployed to a Raspberry Pi.
+Before hardware use, bench-validate the serial link and firmware, then implement and
+validate button wiring, actuator drivers, GUI, Dexcom acquisition, and systemd
+supervision. No real credentials or patient data belong in this repository. Nothing
+has been deployed to a Raspberry Pi or flashed to an Uno.
 
 ## License
 
