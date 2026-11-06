@@ -1,5 +1,32 @@
 # Development log
 
+## 2026-11-06 — M3 review fix: backoff across short-lived connections
+
+### Changes and decisions
+
+- Review finding (PR #5): every successful open reset the reconnect backoff, so a
+  device that opens but fails immediately was reopened every `reconnect_initial_s`,
+  resetting the Uno via DTR and writing its EEPROM boot counter each time.
+- The backoff now resets only when a connection fails after staying up for at least
+  `reconnect_max_s`; shorter connections keep doubling towards the cap. No new setting:
+  a connection that outlives the longest retry interval counts as stable.
+
+### Hardware and protocol record
+
+- Reconnect behavior updated in `docs/PROTOCOL.md` and `docs/ARCHITECTURE.md`. With the
+  example backoff (1 s to 30 s), a persistently failing device is reopened at most about
+  twice a minute.
+
+### Validation
+
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean, pytest 272 passed.
+- New regression tests: repeated successful opens each followed by an immediate write
+  or read failure retry at 0, 1, 3, 7, 11, 15 s (initial 1 s, cap 4 s); a connection
+  that lasted the cap resets the backoff and doubling restarts at 12, 14, 18 s.
+- Mutation check: restoring reset-on-open, never resetting, and a zero stability
+  threshold each fail the suite.
+- Firmware unchanged.
+
 ## 2026-11-06 — M3 review fix: incomplete serial writes
 
 ### Changes and decisions
