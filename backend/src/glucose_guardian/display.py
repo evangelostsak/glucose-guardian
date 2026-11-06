@@ -1,5 +1,6 @@
 """Display boundary; HDMI GUI implementation is deferred."""
 from typing import Protocol
+
 from .alarms import State
 from .providers import Reading
 
