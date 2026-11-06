@@ -1,0 +1,21 @@
+# TEMPLATE ONLY: not installable until the persistent runtime is implemented.
+[Unit]
+Description=Glucose Guardian supplementary alarm (prototype)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=glucose-guardian
+WorkingDirectory=/opt/glucose-guardian
+# Placeholder runtime is absent intentionally; the finite demo is not a service.
+ExecStart=/opt/glucose-guardian/.venv/bin/python -m glucose_guardian.service
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

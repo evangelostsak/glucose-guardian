@@ -1,0 +1,12 @@
+# Synthetic development values only. Not clinical recommendations.
+# Runtime configuration loading is deferred; the demo uses simulation only.
+provider = "simulated"
+[alarm]
+low = 70
+critical = 55
+max_age_s = 600
+heartbeat_timeout_s = 5
+acknowledgement_s = 60
+[hardware]
+outputs_enabled = false
+# Serial path, GPIO pins, driver ratings and wiring remain unassigned.
