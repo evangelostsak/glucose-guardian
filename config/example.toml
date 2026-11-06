@@ -9,7 +9,8 @@ rearm_mg_dl = 10
 max_age_s = 600
 max_future_skew_s = 60
 heartbeat_timeout_s = 5
-acknowledgement_s = 60
+glucose_acknowledgement_s = 60
+fault_acknowledgement_s = 60
 [runtime]
 tick_s = 1
 fetch_interval_s = 60
@@ -18,6 +19,8 @@ clock_check_interval_s = 60
 clock_check_timeout_s = 5
 [simulation]
 scenario = "normal"
+[transport]
+kind = "simulated"
 [hardware]
 outputs_enabled = false
 # Serial path, GPIO pins, driver ratings and wiring remain unassigned.
