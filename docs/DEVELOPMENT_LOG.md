@@ -1,5 +1,45 @@
 # Development log
 
+## 2026-11-06 — M0 housekeeping
+
+### Changes and decisions
+
+- Licensed the project `GPL-3.0-or-later` (owner's choice): canonical GPL-3.0 text in
+  `LICENSE`, the "or any later version" notice in README, and `license =
+  "GPL-3.0-or-later"` in `pyproject.toml`. The SPDX field needs setuptools 77 or newer,
+  so the build requirement rose from `>=68` to `>=77`.
+- Added `CLAUDE.md`, which imports AGENTS.md so engineering rules have one source.
+- Renamed `docs/architecture.md`, `docs/safety.md` and `docs/hardware.md` to
+  `ARCHITECTURE.md`, `SAFETY.md` and `HARDWARE.md` with `git mv`; README links and the
+  audit's link to the hardware document updated (link target only).
+- CI: the Python job is a 3.11 and 3.13 matrix running ruff, strict mypy and pytest from
+  `backend/`. Lint tools are pinned in a `lint` extra (ruff 0.17.4, mypy 2.4.1).
+- Ruff selects E, F, W, I, B with line length 100, so the two existing 89–90 character
+  lines in `alarms.py` need no rewrapping.
+- Code changes are lint-only: import grouping in three modules and a `-> None` annotation
+  on `Policy.__post_init__`. No behavior change.
+- Owner kept status checks unrequired on the protected `main`.
+
+### Hardware and protocol record
+
+- No changes to hardware assumptions, GPIO mappings, alarm behavior or the serial protocol.
+
+### Validation
+
+- GitHub Actions passed on `4318378` (runs 42221247588, 42222916647, 42223329610); the
+  earlier "still queued" status is resolved.
+- Python 3.11.18 and 3.13.18, fresh environments with `.[test,lint]`: ruff clean, mypy
+  strict clean (6 files), pytest 20 passed.
+- `yamllint` on `ci.yml`: clean.
+- Wheel builds: setuptools 76.1.0 rejects the SPDX `license` string; 77.0.1 and 77.0.3
+  emit `License-Expression: GPL-3.0-or-later` (PyPI has no 77.0.0).
+- `pio run`: success, 191 B RAM, 1644 B flash (firmware unchanged).
+
+### Unresolved issues
+
+- M1 owner decisions listed in audit section 7.
+- CI still triggers on both push and pull_request, and actions are pinned by tag (audit L5).
+
 ## 2026-11-06 — Repository audit
 
 ### Changes and decisions
