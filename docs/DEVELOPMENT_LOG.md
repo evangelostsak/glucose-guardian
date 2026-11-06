@@ -1,5 +1,35 @@
 # Development log
 
+## 2026-11-06 — Repository audit
+
+### Changes and decisions
+
+- Audited the Codex scaffold at commit `a4cf086`.
+- Added [audits/2026-11-06-initial-audit.md](audits/2026-11-06-initial-audit.md): inventory,
+  architecture assessment, 2 critical, 7 high, 10 medium and 6 low findings, roadmap M0–M7.
+- No source, firmware, test, CI or configuration changes. Recommended next work is M0
+  housekeeping then M1 alarm policy v2, pending owner approval and threshold decisions.
+
+### Hardware and protocol record
+
+- No changes to hardware assumptions, GPIO mappings, alarm behavior or the serial protocol.
+- Audit flags for later review: Uno power topology (single audible annunciator), latching
+  `G`/`F` frames, DTR auto-reset on port open, and the absence of an AVR watchdog.
+
+### Validation
+
+- pytest: 20 passed on Python 3.14.4 (pytest 9.0.2) and on Python 3.11.18.
+- PlatformIO 6.1.18 / atmelavr 5.1.0: Uno build succeeded; 191 bytes RAM, 1644 bytes flash.
+- `mypy --strict`: 1 error (missing return annotation). `ruff`: 5 style findings.
+- GitHub Actions run 42221247588 still queued; remote CI has not completed.
+
+### Unresolved issues
+
+- Critical C1 (hyperglycemia and implausible values evaluate as normal) and C2 (unbounded
+  acknowledgement window) are open.
+- Owner decisions needed before M1: hyperglycemia thresholds, plausibility bounds, maximum
+  acknowledgement window, acknowledgement semantics, license.
+
 ## 2026-11-06 — Initial scaffold and development handoff
 
 ### Changes and decisions
