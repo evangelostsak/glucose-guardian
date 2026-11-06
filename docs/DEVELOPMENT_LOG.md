@@ -1,5 +1,72 @@
 # Development log
 
+## 2026-11-06 — M3 serial protocol v1
+
+### Changes and decisions
+
+- Owner decisions:
+  - separate `glucose_acknowledgement_s` and `fault_acknowledgement_s`, each capped
+    at 900 s;
+  - a short press silences glucose only, and the display shows "Hold 2 s to silence"
+    when only faults sound;
+  - the Uno's standalone link-lost silence lasts at most 60 s, re-arms automatically
+    and cannot be extended;
+  - timings: 50 ms debounce, 2 s long press, 30 s stuck, 2 s watchdog, 10 s grace;
+  - pyserial for the byte transport;
+  - PC-only: no pins, outputs or flashing.
+- Superseded M2 decision: a press no longer silences both channels.
+- Protocol v1 (`docs/PROTOCOL.md`, new): CRC-16/CCITT-FALSE ASCII frames of at most
+  64 bytes with `GG1` version, Pi session and sequence, and Uno boot counter and
+  sequence. The state frame is the heartbeat. Button presses travel as cumulative
+  counters so a lost report loses no press.
+- Pi: new `protocol.py` (pure framing and validation), `link.py` (pure link state:
+  ack window of 16, round-trip liveness, duplicate and replay rejection, reset
+  detection, counter deltas) and `serial_transport.py` (pyserial, bounded reads,
+  non-blocking writes, exponential backoff). The `AlarmTransport` protocol became
+  `receive()` / `send(state, monotonic_s)`.
+- Alarm engine: `update()` takes the required `controller_faults` argument; new faults
+  `controller_reset` (latched by the runtime until a long press, the one fault a press
+  clears because it is an event) and `button_stuck`.
+- Firmware: `lib/guardian/` (protocol, `PiLink`, `Button`, reset cause, `Controller`)
+  in C++11 without Arduino headers or the STL, with 22 native Unity tests sharing frame
+  vectors with Python. `main.cpp` captures reset flags in `.init3`, enables the 2 s
+  watchdog, increments an EEPROM boot counter and computes the alarm demand without
+  driving pins. A stuck press never acknowledges anything; long presses are
+  classified on release.
+- A classification bug was found by the cross-language tests and fixed on both sides:
+  a body of just `GG1` had been reported as a version mismatch instead of malformed.
+- Configuration: required `[transport]` table (`kind = "simulated"`, or `"serial"`
+  with `device` and reconnect timing). `pyserial==3.5` became the first runtime
+  dependency; `types-pyserial` joined the lint extra.
+- CI: the firmware job builds `-e uno` and runs `pio test -e native`.
+
+### Hardware and protocol record
+
+- Serial protocol replaced: the initial scaffold's one-character `H`/`N`/`G`/`F` bench
+  protocol is gone; v1 is specified in `docs/PROTOCOL.md`.
+- Provisional firmware timing recorded in `docs/HARDWARE.md`. No GPIO assignment; the
+  button input is fixed at released. EEPROM address 0 holds the boot counter.
+- Opening the port resets the Uno via DTR; the stock Optiboot bootloader may hide the
+  reset cause, so resets are detected by the boot counter.
+
+### Validation
+
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean (16 files), pytest 257
+  passed.
+- Firmware: `pio test -e native` 22 of 22 passed with `-Wall -Wextra -Werror
+  -pedantic`; `pio run -e uno` succeeded at 382 B RAM and 3534 B flash.
+- Mutation check: 18 Python and 12 firmware deliberate defects each made the
+  suite fail.
+- Not validated: anything on a physical Uno (PC-only by owner decision).
+
+### Unresolved issues
+
+- Bench validation of the watchdog reset, reset causes, serial timing and DTR
+  behavior (needs approval).
+- The heartbeat timeout is defined separately on the Pi (`heartbeat_timeout_s`) and
+  the Uno (5 s constant).
+- Restart persistence of the retained alarm level (M6).
+
 ## 2026-11-06 — M2 simulated end-to-end runtime
 
 ### Changes and decisions
