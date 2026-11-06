@@ -1,5 +1,4 @@
 # Synthetic development values only. Not clinical recommendations.
-# Runtime configuration loading is deferred; the demo uses simulation only.
 provider = "simulated"
 [alarm]
 urgent_low_mg_dl = 55
@@ -11,6 +10,14 @@ max_age_s = 600
 max_future_skew_s = 60
 heartbeat_timeout_s = 5
 acknowledgement_s = 60
+[runtime]
+tick_s = 1
+fetch_interval_s = 60
+fetch_timeout_s = 10
+clock_check_interval_s = 60
+clock_check_timeout_s = 5
+[simulation]
+scenario = "normal"
 [hardware]
 outputs_enabled = false
 # Serial path, GPIO pins, driver ratings and wiring remain unassigned.
