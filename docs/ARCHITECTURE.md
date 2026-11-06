@@ -227,11 +227,15 @@ communication fault; a planned stop is not silent.
 
 `SerialTransport` uses pyserial only to move bytes (non-blocking, exclusive open,
 115200 baud); framing, checksums, link state and reconnection are this package's
-code. Each `receive()` reads at most 1024 bytes into a 63-byte line buffer; each
-`send()` writes one state frame and drops it (counted) if the write would block. An
-open failure or I/O error closes the port and schedules a retry with exponential
-backoff between `reconnect_initial_s` and `reconnect_max_s`; a successful open resets
-the backoff and starts a new initial connection. Tests exercise the real pyserial
+code. Each `receive()` reads at most 1024 bytes into a 63-byte line buffer. Each
+`send()` writes one state frame through `PyserialPort`, which returns 0 instead of
+calling pyserial when a zero-timeout `select` reports no room; pyserial would
+otherwise spin on a full buffer. A frame's sequence enters the acknowledgement window
+only after a complete write. A zero, partial or failed write, an open failure or an
+I/O error discards unsent output, closes the port and schedules a retry with
+exponential backoff between `reconnect_initial_s` and `reconnect_max_s`; a successful
+open resets the backoff and starts a new initial connection. See "Transmit failures"
+in [PROTOCOL.md](PROTOCOL.md). Tests exercise the real pyserial
 path over pseudo-terminals against a Python Uno emulator.
 
 ## Firmware
