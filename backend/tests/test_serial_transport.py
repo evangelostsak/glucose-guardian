@@ -1,12 +1,13 @@
 import math
 import os
+import threading
 
 import pytest
 import serial
 from harness import FakeUno, build_runtime, pump
 
 from glucose_guardian.alarms import Fault, GlucoseLevel, State
-from glucose_guardian.protocol import MAX_FRAME_BYTES, ResetCause, decode_state
+from glucose_guardian.protocol import MAX_FRAME_BYTES, ResetCause, decode_state, encode_state
 from glucose_guardian.providers import SimulatedProvider
 from glucose_guardian.serial_transport import MAX_READ_BYTES, SerialTransport, open_serial
 
@@ -14,6 +15,7 @@ SESSION = 0x7F3A
 QUIET = State(GlucoseLevel.NORMAL, True, frozenset(), False, False)
 URGENT = State(GlucoseLevel.URGENT_LOW, True, frozenset(), False, False)
 K, R, S = Fault.COMMUNICATION, Fault.CONTROLLER_RESET, Fault.BUTTON_STUCK
+FRAME_BYTES = len(encode_state(SESSION, 0, QUIET))
 
 
 class FakePort:
@@ -21,7 +23,9 @@ class FakePort:
         self.uno = uno
         self.pending = b""
         self.read_error: Exception | None = None
-        self.write_error: Exception | None = None
+        self.write_results: list[int | Exception] = []
+        self.discard_error: Exception | None = None
+        self.calls: list[str] = []
         self.closed = False
         self.sizes: list[int] = []
 
@@ -33,13 +37,21 @@ class FakePort:
         return data
 
     def write(self, data: bytes) -> int:
-        if self.write_error is not None:
-            raise self.write_error
+        self.calls.append("write")
+        result = self.write_results.pop(0) if self.write_results else len(data)
+        if isinstance(result, Exception):
+            raise result
         if self.uno is not None:
-            self.pending += self.uno.respond(data)
-        return len(data)
+            self.pending += self.uno.respond(data[:result])
+        return result
+
+    def discard_output(self) -> None:
+        self.calls.append("discard")
+        if self.discard_error is not None:
+            raise self.discard_error
 
     def close(self) -> None:
+        self.calls.append("close")
         self.closed = True
 
 
@@ -103,28 +115,89 @@ def test_round_trip_over_a_fake_port_and_bounded_reads():
     assert set(port.sizes) == {MAX_READ_BYTES}
 
 
-def test_write_timeout_drops_the_frame_but_keeps_the_port():
+def connected_transport(port: FakePort) -> tuple[SerialTransport, Opener]:
     opener = Opener([0.0])
-    port = FakePort(None)
-    port.write_error = serial.SerialTimeoutException("full")
     opener.ports.append(port)
     transport = fake_transport(opener)
     transport.receive(0)
+    assert transport.connected
+    return transport, opener
+
+
+def test_complete_write_is_recorded_as_sent():
+    transport, _ = connected_transport(FakePort(FakeUno(1)))
     transport.send(QUIET, 0)
-    assert transport.connected and transport.counts["send_dropped"] == 1
+    assert transport.connected and transport.counts["frames_sent"] == 1
+    assert transport.receive(0.5).link_age_s == 0.5
 
 
-def test_write_error_disconnects_and_send_while_closed_is_a_no_op():
-    opener = Opener([0.0])
+@pytest.mark.parametrize("written", [0, 1, 10, FRAME_BYTES - 1])
+def test_incomplete_write_discards_output_and_reconnects(written):
+    port = FakePort(FakeUno(1))
+    port.write_results = [written]
+    transport, opener = connected_transport(port)
+    transport.send(QUIET, 0)
+    assert port.calls == ["write", "discard", "close"]
+    assert not transport.connected
+    assert (transport.counts["incomplete_writes"], transport.counts["frames_sent"]) == (1, 0)
+    assert not transport.link._sent
+    assert transport.receive(0.5).link_age_s == math.inf
+    assert opener.attempts == [0.0]
+
+
+@pytest.mark.parametrize("error", [
+    serial.SerialTimeoutException("full"),
+    serial.SerialException("gone"),
+    OSError("io"),
+])
+def test_write_exception_discards_output_and_reconnects(error):
     port = FakePort(None)
-    port.write_error = serial.SerialException("gone")
-    opener.ports.append(port)
-    transport = fake_transport(opener)
-    transport.receive(0)
+    port.write_results = [error]
+    transport, _ = connected_transport(port)
     transport.send(QUIET, 0)
-    assert not transport.connected and port.closed
+    assert port.calls == ["write", "discard", "close"]
+    assert (transport.counts["failed_writes"], transport.counts["disconnects"]) == (1, 1)
     transport.send(QUIET, 0.5)
-    assert transport.counts["disconnects"] == 1
+    assert port.calls == ["write", "discard", "close"]
+
+
+def test_recovery_still_closes_when_discard_fails():
+    port = FakePort(None)
+    port.write_results = [3]
+    port.discard_error = serial.SerialException("gone")
+    transport, _ = connected_transport(port)
+    transport.send(QUIET, 0)
+    assert port.closed and not transport.connected
+    assert transport.counts["discard_failures"] == 1
+
+
+def test_truncated_frame_never_refreshes_liveness_and_recovers():
+    clock = [0.0]
+    opener = Opener(clock)
+    uno = FakeUno(1)
+    first, second = FakePort(uno), FakePort(uno)
+    first.write_results = [FRAME_BYTES - 1]
+    opener.ports += [first, second]
+    transport = fake_transport(opener)
+    transport.receive(0)
+    transport.send(QUIET, 0)
+    assert not transport.connected
+    for clock[0] in (0.5, 1):
+        transport.receive(clock[0])
+    assert transport.connected
+    transport.send(QUIET, 1)
+    assert uno.states == []
+    assert transport.receive(2).link_age_s == math.inf
+    transport.send(QUIET, 2)
+    assert len(uno.states) == 1
+    assert transport.receive(3).link_age_s == 1
+    assert transport.counts["incomplete_writes"] == 1
+
+
+def test_send_while_closed_is_a_no_op():
+    transport = fake_transport(Opener([0.0]))
+    transport.send(QUIET, 0)
+    assert transport.counts == {}
 
 
 def test_reconnect_with_a_new_boot_is_an_initial_connection():
@@ -281,3 +354,56 @@ def test_runtime_over_pty_stuck_button(rig):
     assert rig.run(2).faults == {S}
     rig.uno.button_stuck = False
     assert rig.run(2).faults == set()
+
+
+def test_real_pty_full_buffer_never_blocks_and_recovers(pty):
+    master, path, _ = pty
+    transport = SerialTransport(device=path, session=SESSION, reconnect_initial_s=1,
+                                reconnect_max_s=4, open_port=open_serial)
+    transport.receive(0)
+
+    def flood() -> None:
+        for _ in range(100_000):
+            transport.send(QUIET, 0)
+            if not transport.connected:
+                return
+
+    worker = threading.Thread(target=flood, daemon=True)
+    worker.start()
+    worker.join(5)
+    try:
+        assert not worker.is_alive()
+        assert not transport.connected
+        assert transport.counts["incomplete_writes"] == 1
+        assert transport.counts["frames_sent"] > 10
+        while True:
+            try:
+                os.read(master, 65536)
+            except BlockingIOError:
+                break
+        transport.receive(1)
+        assert transport.connected
+        transport.send(URGENT, 1)
+        frame = os.read(master, 4096)
+        assert decode_state(frame[:-1]).glucose == "U"
+    finally:
+        transport.close()
+
+
+def test_pyserial_port_full_buffer_returns_zero_without_blocking(pty):
+    _, path, _ = pty
+    port = open_serial(path)
+    frame = encode_state(SESSION, 0, QUIET)
+    complete = 0
+    while complete < 10_000 and port.write(frame) == len(frame):
+        complete += 1
+    assert 10 < complete < 10_000
+    results: list[int] = []
+    worker = threading.Thread(target=lambda: results.append(port.write(frame)), daemon=True)
+    worker.start()
+    worker.join(2)
+    blocked = worker.is_alive()
+    if not blocked:
+        port.discard_output()
+        port.close()
+    assert not blocked and results == [0]
