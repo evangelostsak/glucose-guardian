@@ -29,7 +29,7 @@ class Policy:
     heartbeat_timeout_s: float
     acknowledgement_s: float
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         values = (self.low, self.critical, self.max_age_s,
                   self.heartbeat_timeout_s, self.acknowledgement_s)
         if not all(isfinite(v) and v > 0 for v in values):
