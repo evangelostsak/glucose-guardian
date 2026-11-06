@@ -20,21 +20,35 @@ The current firmware has no button input or physical alarm output.
 
 ## Failure modes
 
-The alarm engine is not yet connected to a runtime, display or output; the runtime
-that supplies acquisition, clock and heartbeat status arrives in M2 and M3.
+The simulated runtime (M2) connects the alarm engine to bounded acquisition, a clock
+check, a display frame and a transport double. There is still no Dexcom adapter,
+serial transport, GUI or physical output, so "simulated" below means verified with
+synthetic scenarios only.
 
 | Condition | Detected by | Indication | Status |
 |---|---|---|---|
-| Urgent low, low or high glucose | Fresh valid reading crossing a threshold | Glucose alarm | Engine implemented |
+| Urgent low, low or high glucose | Fresh valid reading crossing a threshold | Glucose alarm | Simulated |
 | Reading below 40 or above 400 mg/dL | Normal threshold classification | Urgent low or high glucose alarm (with the configured thresholds) | Engine implemented |
-| No reading, or reading older than `max_age_s` | Validation | `missing_data` fault; unresolved glucose alarm kept, normal becomes unknown | Engine implemented |
-| Non-numeric, non-finite or non-positive value; naive timestamp; timestamp more than 60 s in the future | Validation | `invalid_reading` fault | Engine implemented |
-| Dexcom or network fetch failure | Runtime reports `acquisition_ok = false` | `acquisition` fault; latest reading used until stale | Engine implemented; runtime M2, adapter M4 |
-| Pi clock not synchronized (no RTC on the Pi 3B) | Runtime reports `clock_synchronized = false` | `clock_unsynchronized` fault; readings not evaluated | Engine implemented; runtime M2 |
-| Uno heartbeat lost, seen from the Pi | Heartbeat age above `heartbeat_timeout_s` | `communication` fault | Engine implemented; transport M3 |
-| Pi process crash or hang | Uno heartbeat timeout | Uno system fault | Firmware detects it internally; no output until M7 |
+| No reading, or reading older than `max_age_s` | Validation | `missing_data` fault; unresolved glucose alarm kept and shown as last known with its age; normal becomes unknown | Simulated |
+| Non-numeric, non-finite or non-positive value; naive timestamp; timestamp more than 60 s in the future | Validation | `invalid_reading` fault | Simulated |
+| Fetch error or exception | Acquisition worker | `acquisition` fault; latest reading used until stale | Simulated; Dexcom adapter M4 |
+| Fetch blocked or slower than `fetch_timeout_s` | Acquisition worker hard timeout | `acquisition` fault; supervisor keeps ticking; one thread at most | Simulated |
+| Pi clock not synchronized (no RTC on the Pi 3B), or the check fails or times out | Clock-check worker | `clock_unsynchronized` fault; readings not evaluated | Simulated; systemd check unit-tested, not yet run on the Pi |
+| Uno heartbeat lost, or heartbeat query fails, seen from the Pi | Heartbeat age above `heartbeat_timeout_s` | `communication` fault | Simulated; serial transport M3 |
+| Display or transport send failure | Runtime adapter guard | Counted and logged; alarm evaluation continues | Simulated |
+| Alarm-engine defect | Exception out of the loop | Service exits with status 1; heartbeats stop | Simulated; systemd restart M6 |
+| Pi process crash, hang or planned stop | Uno heartbeat timeout | Uno system fault | Firmware detects it internally; no output until M7 |
 | Uno failure or USB loss | Not yet | None | Pi-side Uno liveness in M3 |
 | Total power loss | Not possible | None | Requires backup power (hardware review) |
+
+Acknowledging a stale glucose alarm silences only the glucose channel; the
+missing-data fault keeps sounding until it is acknowledged separately. A button press
+acknowledges both audible channels independently for at most 15 minutes and clears
+neither the fault nor the retained glucose level.
+
+A restart is fail-safe but lossy: acknowledgements are forgotten and the system
+re-alarms, but a retained urgent low during stale data becomes unknown glucose with a
+missing-data fault, and the display shows no value until fresh data arrives.
 
 Unverified risks include driver failure, USB reset, power loss, loud sound,
 heating, short circuits, enclosure and cable hazards, and backup battery failure.
