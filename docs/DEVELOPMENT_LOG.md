@@ -1,5 +1,55 @@
 # Development log
 
+## 2026-11-06 — M1 alarm policy v2
+
+### Changes and decisions
+
+- Owner decisions: levels urgent low, low and high (no urgent high); separate glucose and
+  fault acknowledgement; improvement while silenced stays quiet; further worsening
+  re-arms after a configurable `rearm_mg_dl`; hysteresis with a required margin;
+  15-minute hard acknowledgement cap; 60 s future-timestamp tolerance; no special
+  handling outside the G7 40–400 mg/dL display range.
+- Design confirmations: the re-arm amount applies to every glucose alarm (falling for
+  lows, rising for high); one `acknowledgement_s` serves both channels; an unresolved
+  alarm level keeps sounding while data is not fresh.
+- New `validation.py` separates value and timestamp checks from alarm policy.
+  Non-numeric and boolean values are now invalid instead of crashing or classifying.
+- `alarms.py` rewritten: `GlucoseLevel` (renamed `CRITICAL` to `URGENT_LOW`, added
+  `HIGH` and `UNKNOWN`), `Fault` set with the new `CLOCK` and `MISSING_DATA`
+  (replacing `STALE`), and per-channel acknowledgement records with expiry, re-arm
+  baseline and shrinking fault set.
+- `Policy` fields renamed with units (`urgent_low_mg_dl`, `low_mg_dl`, `high_mg_dl`,
+  `hysteresis_mg_dl`, `rearm_mg_dl`, `max_future_skew_s`), all required, with ordering,
+  band-overlap and 15-minute cap validation.
+- `update()` takes every input as a required keyword: `acquisition_ok` no longer
+  defaults to true, and the new `clock_synchronized` is required. A naive `now` raises.
+- `State` reports `glucose`, `glucose_current`, `faults`, per-channel silenced flags,
+  and `glucose_audible` / `fault_audible`.
+- `config/example.toml` updated with synthetic values for the new fields; a test keeps
+  it a valid `Policy`.
+- ARCHITECTURE.md rewritten for validation, levels, faults, acknowledgement and policy;
+  SAFETY.md gained a failure-mode table.
+
+### Hardware and protocol record
+
+- Alarm behavior changed as above. No changes to hardware assumptions, GPIO mappings
+  or the serial protocol. The button-to-channel mapping is deferred to M3.
+
+### Validation
+
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean (7 files), pytest 82 passed.
+- Mutation check: ten deliberate defects (no 15-minute cap, acknowledgement covering
+  every level, no re-arm, fault set not shrinking, stale normal kept, no hysteresis,
+  zero future skew, communication masking other faults, no high level, clock ignored)
+  each made the suite fail.
+- `pio run`: success, 191 B RAM, 1644 B flash (firmware unchanged).
+
+### Unresolved issues
+
+- The engine is not yet driven by a runtime; M2 supplies the loop, configuration
+  loading and clock check.
+- Button-to-channel mapping and Uno-reported hardware faults (M3).
+
 ## 2026-11-06 — M0 housekeeping
 
 ### Changes and decisions
