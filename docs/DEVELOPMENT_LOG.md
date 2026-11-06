@@ -1,5 +1,50 @@
 # Development log
 
+## 2026-11-06 — M3 review fix: incomplete serial writes
+
+### Changes and decisions
+
+- Review finding (PR #5): `SerialTransport.send()` ignored the byte count returned by
+  pyserial's non-blocking `write()`. Reproduced against pyserial 3.5 on a pseudo-terminal:
+  after 820 complete frames a write returned 12 of 26 bytes without raising.
+- A second defect found while reproducing: with a completely full buffer, pyserial's
+  `write()` retries `EAGAIN` in a loop and never returns, which would have frozen the
+  supervisory loop.
+- New `PyserialPort` adapter: a zero-timeout `select` guard returns 0 instead of
+  calling pyserial when there is no room; `discard_output()` maps `termios.error` to
+  `SerialException`. The transport depends on a small `Port` protocol.
+- Any zero, partial or failed write is a failed transmission: counted
+  (`incomplete_writes` / `failed_writes`), unsent output discarded, port closed,
+  reconnect with backoff. A write timeout now also reconnects instead of only being
+  counted.
+- `Link.next_seq()` only allocates; `Link.sent()` records the send time after a
+  complete write, so a failed frame can never be acknowledged into liveness.
+- Alarm policy, acknowledgement semantics, protocol format and firmware behavior
+  unchanged; the firmware gained a test for a truncated frame joined with the next one.
+
+### Hardware and protocol record
+
+- Pi transmit-failure handling added to `docs/PROTOCOL.md`; the bench checklist gained
+  a stalled-device close check.
+
+### Validation
+
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean, pytest 269 passed. The
+  serial transport tests passed 20 consecutive runs.
+- Firmware: `pio test -e native` 23 of 23; `pio run -e uno` unchanged at 382 B RAM and
+  3534 B flash.
+- Mutation check: eight deliberate defects in the fix each fail the suite. Removing the
+  `select` guard initially went undetected, because the transport test disconnects on
+  the first partial write before the spin can occur; a direct adapter test now
+  catches it in 2 s.
+
+### Unresolved issues
+
+- Whether `close()` on a stalled real USB-serial device returns promptly after the
+  output discard needs bench validation.
+- Persistent incomplete writes cause a reconnect, and therefore a DTR reset and EEPROM
+  boot-counter write, per backoff interval.
+
 ## 2026-11-06 — M3 serial protocol v1
 
 ### Changes and decisions
