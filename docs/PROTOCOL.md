@@ -107,7 +107,7 @@ after it is accepted.
 |---|---|
 | First accepted report after the port opens | Initial connection; button counters become the baseline. A `W` or `B` cause flags an unexpected reset. |
 | New `boot` while connected | Unexpected reset: `controller_reset` fault latched until a long press; presses since the reboot are counted |
-| Port error, unplug or hangup | Port closed and reopened with exponential backoff from `reconnect_initial_s` to `reconnect_max_s`; the next report is an initial connection |
+| Port error, unplug or hangup | Port closed and reopened with exponential backoff from `reconnect_initial_s` to `reconnect_max_s`; the backoff resets only after a connection has lasted `reconnect_max_s`; the next report is an initial connection |
 | No accepted report for longer than `heartbeat_timeout_s` | `communication` fault |
 
 Opening the port asserts DTR, which resets the Uno; that reset arrives as an initial
