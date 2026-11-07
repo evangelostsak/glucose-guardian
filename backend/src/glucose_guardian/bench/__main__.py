@@ -1,4 +1,4 @@
-"""Bench command line: discover devices, run the bench suite or the watchdog test."""
+"""Bench command line: discovery, bench suite, watchdog test and bootloader authorization."""
 import argparse
 import json
 import logging
@@ -14,6 +14,8 @@ from typing import Any
 from serial.tools import list_ports
 
 from ..serial_transport import open_serial
+from . import authorization
+from .authorization import AuthorizationError
 from .checks import HARDWARE, Bench, dtr_reset, run_suite, run_watchdog
 from .discovery import BY_ID_DIR, candidates, describe
 from .probe import open_bench_port
@@ -21,7 +23,6 @@ from .report import Report, Status, Target, write
 
 log = logging.getLogger("glucose_guardian.bench")
 
-OPTIBOOT_FLASH_BYTES = 32768
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_USAGE = 2
@@ -42,18 +43,32 @@ def discover() -> int:
     return EXIT_OK
 
 
-def bootloader_version(dump: Path) -> int:
-    data = dump.read_bytes()
-    if len(data) != OPTIBOOT_FLASH_BYTES:
-        print(f"No Optiboot version marker: dump is {len(data)} bytes. Do not run the watchdog "
-              "test on this board.")
+def bootloader(device: str, record: Path, build_dir: Path) -> int:
+    tooling = {"harness": version("glucose-guardian"), "avrdude": authorization.avrdude_version()}
+    try:
+        data = authorization.check_bootloader(device, record, build_dir, authorization.LINUX,
+                                              authorization.run_avrdude, tooling, utc_now())
+    except AuthorizationError as error:
+        print(f"Bootloader check FAILED: {error}\nDo not flash the watchdog-test image.",
+              file=sys.stderr)
         return EXIT_FAILED
-    major, minor = data[-1], data[-2]
-    print(f"Optiboot version {major}.{minor}")
-    if major < 4 or major == 0xFF:
-        print("Bootloader too old or unknown for watchdog resets. Do not run the watchdog test.")
+    usb = data["device"]
+    print(f"Optiboot {data['bootloader']['version']} on USB {usb['usb_id']} at port "
+          f"{usb['usb_port']} (device {usb['devnum']}), serial number "
+          f"{'present' if usb['serial_sha256'] else 'absent'}.")
+    print(f"Authorization written to {record}. It is valid for "
+          f"{authorization.MAX_AGE_S:g} s and only for this USB connection, host boot and "
+          "bench build.")
+    return EXIT_OK
+
+
+def authorize_watchdog(device: str, record: Path, build_dir: Path) -> int:
+    try:
+        authorization.authorize(device, record, build_dir, authorization.LINUX)
+    except AuthorizationError as error:
+        print(f"Watchdog-test flashing REFUSED: {error}", file=sys.stderr)
         return EXIT_FAILED
-    print("OK: bootloader handles watchdog resets.")
+    print("Bootloader authorization matches this board, connection and build.")
     return EXIT_OK
 
 
@@ -117,13 +132,19 @@ def main(argv: list[str]) -> int:
         if name == "run":
             sub.add_argument("--interactive", action="store_true")
             sub.add_argument("--flash-record", type=Path)
-    dump = commands.add_parser("bootloader-version", help="check an avrdude raw flash dump")
-    dump.add_argument("dump", type=Path)
+    for name, text in (("bootloader", "read the flash read-only and record the bootloader"),
+                       ("authorize-watchdog", "check the record before watchdog-test flashing")):
+        sub = commands.add_parser(name, help=text)
+        sub.add_argument("--device", required=True)
+        sub.add_argument("--record", required=True, type=Path)
+        sub.add_argument("--build-dir", required=True, type=Path)
     args = parser.parse_args(argv)
     if args.command == "discover":
         return discover()
-    if args.command == "bootloader-version":
-        return bootloader_version(args.dump)
+    if args.command == "bootloader":
+        return bootloader(args.device, args.record, args.build_dir)
+    if args.command == "authorize-watchdog":
+        return authorize_watchdog(args.device, args.record, args.build_dir)
     return run(args.command, args.device, args.report_dir,
                args.command == "run" and args.interactive,
                args.flash_record if args.command == "run" else None)
