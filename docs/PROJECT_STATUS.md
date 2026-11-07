@@ -48,10 +48,23 @@ M3 serial protocol v1 is complete on `feat/m3-serial-protocol`, PC-only:
 
 This resolves audit findings H3, H6, M1, M7, L3 and L4.
 
+USB-only bench tooling is complete on `feat/bench-harness`, PC-validated, not yet
+run on hardware ([BENCH.md](BENCH.md)):
+
+- `python -m glucose_guardian.bench` (`discover`, `run`, `watchdog`,
+  `bootloader-version`) built on the production protocol, link, transport and runtime
+  code, with JSON and Markdown reports (PASS / FAIL / NOT TESTED, physical or
+  simulated evidence, redacted serial numbers).
+- A separate `uno-watchdog-test` firmware build that announces itself and hangs on
+  purpose; the production image is byte-identical to `main`.
+- `bench/Makefile` for build, deploy, setup, discovery, read-only bootloader check,
+  checksum-verified flashing with a watchdog-test interlock, runs, restore and
+  diagnostics collection.
+
 ## Next milestone
 
-- **Bench validation (needs separate approval):** flash an Uno with nothing on its
-  outputs and work through the checklist in [HARDWARE.md](HARDWARE.md).
+- **Bench validation on the Pi (flashing needs approval):** run the
+  [BENCH.md](BENCH.md) workflow on the real Uno and record the reports.
 - **M4 Dexcom Share adapter,** following the roadmap: behind a configuration flag,
   tested with synthetic recorded responses, with credentials held in systemd
   credentials outside the repository. It requires owner approval to start.
