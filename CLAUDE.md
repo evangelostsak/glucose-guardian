@@ -16,6 +16,7 @@ Keep these current after every substantial task:
 - `docs/DEVELOPMENT_LOG.md`: per-task entry required by the handoff protocol
 - `docs/PROTOCOL.md`: serial protocol specification shared by Pi and Uno
 - `docs/HARDWARE.md`: electrical interface assumptions and provisional firmware timing
+- `docs/BENCH.md`: USB-only Uno bench procedure, checks and pass criteria
 - `docs/audits/`: dated audits; never rewrite a past audit's findings (link fixes only), add a new one
 
 Rename files with `git mv`; never create files that differ from an existing one only in
