@@ -1,4 +1,4 @@
-"""Device-bound authorization to flash the watchdog-test image."""
+"""Device-bound records: bootloader authorization for flashing the watchdog-test image."""
 import hashlib
 import json
 import os
@@ -69,7 +69,7 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _digest(body: dict[str, Any]) -> str:
+def digest(body: dict[str, Any]) -> str:
     return _sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode())
 
 
@@ -84,6 +84,10 @@ def _identity(usb: Path) -> tuple[str, str, str | None]:
     serial = usb / "serial"
     return (_read(usb / "idVendor"), _read(usb / "idProduct"),
             (_read(serial) or None) if serial.is_file() else None)
+
+
+def host_boot_id(host: Host) -> str:
+    return _read(host.boot_id)
 
 
 def _usb_dir(tty: Path, sysfs: Path) -> Path:
@@ -176,7 +180,7 @@ def check_bootloader(device: str, record: Path, out: Path, host: Host,
                      utc: str) -> dict[str, Any]:
     record.parent.mkdir(parents=True, exist_ok=True)
     record.unlink(missing_ok=True)
-    boot_id = _read(host.boot_id)
+    boot_id = host_boot_id(host)
     before = usb_device(device, host, boot_id)
     build = bench_build(out)
     dump = record.with_name("flash-dump.bin")
@@ -192,20 +196,64 @@ def check_bootloader(device: str, record: Path, out: Path, host: Host,
         dump.unlink(missing_ok=True)
     if usb_device(device, host, boot_id) != before:
         raise AuthorizationError("the USB connection changed during the read; check again")
-    body = {"schema": SCHEMA, "verified_utc": utc, "host_boot_id": boot_id,
-            "verified_boottime_s": host.clock(), "device": asdict(before),
-            "bootloader": asdict(bootloader), "build": asdict(build), "tooling": tooling}
-    data = body | {"integrity_sha256": _digest(body)}
-    partial = record.with_name(record.name + ".partial")
+    return write_record(record, {
+        "schema": SCHEMA, "verified_utc": utc, "host_boot_id": boot_id,
+        "verified_boottime_s": host.clock(), "device": asdict(before),
+        "bootloader": asdict(bootloader), "build": asdict(build), "tooling": tooling})
+
+
+def write_record(path: Path, body: dict[str, Any]) -> dict[str, Any]:
+    data = body | {"integrity_sha256": digest(body)}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(path.name + ".partial")
     partial.write_text(json.dumps(data, indent=2) + "\n")
-    os.replace(partial, record)
+    os.replace(partial, path)
     return data
 
 
-def _differences(recorded: object, current: dict[str, Any], section: str) -> list[str]:
+def load_record(path: Path, keys: set[str], schema: str, kind: str,
+                missing: str) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError as error:
+        raise AuthorizationError(missing) from error
+    except (OSError, ValueError) as error:
+        raise AuthorizationError(f"unreadable {kind} record: {error}") from error
+    if not isinstance(data, dict) or set(data) != keys:
+        raise AuthorizationError(f"malformed {kind} record")
+    body = {key: value for key, value in data.items() if key != "integrity_sha256"}
+    if data["integrity_sha256"] != digest(body):
+        raise AuthorizationError(f"{kind} record was modified after it was written")
+    if data["schema"] != schema:
+        raise AuthorizationError(f"unsupported {kind} schema {data['schema']!r}")
+    return data
+
+
+def _differences(recorded: object, current: dict[str, Any], kind: str, section: str) -> list[str]:
     if not isinstance(recorded, dict) or set(recorded) != set(current):
-        raise AuthorizationError(f"malformed authorization record: {section}")
+        raise AuthorizationError(f"malformed {kind} record: {section}")
     return [key for key, value in current.items() if recorded[key] != value]
+
+
+def check_binding(data: dict[str, Any], time_key: str, max_age_s: float, device: str, out: Path,
+                  host: Host, kind: str) -> None:
+    boot_id = host_boot_id(host)
+    if data["host_boot_id"] != boot_id:
+        raise AuthorizationError(f"{kind} record is from an earlier boot of this host")
+    recorded = data[time_key]
+    if type(recorded) is not float:
+        raise AuthorizationError(f"malformed {kind} record: {time_key}")
+    age = host.clock() - recorded
+    if not 0 <= age <= max_age_s:
+        raise AuthorizationError(f"{kind} record age {age:.0f} s is outside 0 to "
+                                 f"{max_age_s:g} s")
+    differing = _differences(data["device"], asdict(usb_device(device, host, boot_id)), kind,
+                             "device")
+    if differing:
+        raise AuthorizationError(f"{kind} record is for another board or connection "
+                                 f"({', '.join(differing)} differ)")
+    if _differences(data["build"], asdict(bench_build(out)), kind, "build"):
+        raise AuthorizationError(f"the bench build changed since the {kind} record")
 
 
 def _check_bootloader_entry(entry: object) -> None:
@@ -221,36 +269,9 @@ def _check_bootloader_entry(entry: object) -> None:
 
 
 def authorize(device: str, record: Path, out: Path, host: Host) -> dict[str, Any]:
-    try:
-        data = json.loads(record.read_text())
-    except FileNotFoundError as error:
-        raise AuthorizationError(f"no bootloader authorization at {record}; run "
-                                 "'make bootloader' for this board first") from error
-    except (OSError, ValueError) as error:
-        raise AuthorizationError(f"unreadable authorization record: {error}") from error
-    if not isinstance(data, dict) or set(data) != RECORD_KEYS:
-        raise AuthorizationError("malformed authorization record")
-    body = {key: value for key, value in data.items() if key != "integrity_sha256"}
-    if data["integrity_sha256"] != _digest(body):
-        raise AuthorizationError("authorization record was modified after it was written")
-    if data["schema"] != SCHEMA:
-        raise AuthorizationError(f"unsupported authorization schema {data['schema']!r}")
-    boot_id = _read(host.boot_id)
-    if data["host_boot_id"] != boot_id:
-        raise AuthorizationError("authorization is from an earlier boot of this host")
-    verified = data["verified_boottime_s"]
-    if type(verified) is not float:
-        raise AuthorizationError("malformed authorization record: verified_boottime_s")
-    age = host.clock() - verified
-    if not 0 <= age <= MAX_AGE_S:
-        raise AuthorizationError(f"authorization age {age:.0f} s is outside 0 to "
-                                 f"{MAX_AGE_S:g} s; check the bootloader again")
-    differing = _differences(data["device"], asdict(usb_device(device, host, boot_id)),
-                             "device")
-    if differing:
-        raise AuthorizationError("authorization is for another board or connection "
-                                 f"({', '.join(differing)} differ)")
-    if _differences(data["build"], asdict(bench_build(out)), "build"):
-        raise AuthorizationError("the bench build changed since the bootloader check")
+    data = load_record(record, RECORD_KEYS, SCHEMA, "authorization",
+                       f"no bootloader authorization at {record}; run 'make bootloader' for "
+                       "this board first")
+    check_binding(data, "verified_boottime_s", MAX_AGE_S, device, out, host, "authorization")
     _check_bootloader_entry(data["bootloader"])
     return data
