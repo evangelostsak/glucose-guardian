@@ -61,11 +61,13 @@ On the Pi, in `~/glucose-guardian-bench/bench`:
 | Restore production firmware | `make restore DEVICE=...` | **writes flash** |
 | Collect diagnostics | `make collect` | no |
 
-Use the `/dev/serial/by-id/...` path shown by `make discover` as `DEVICE`; `bootloader`
-and the watchdog-test `flash` refuse any other path. `flash` verifies `SHA256SUMS`
-before writing, lets avrdude verify after writing, and stores a flash record that
-`make run` reports as `firmware.upload`. Run `make bootloader` immediately before the
-watchdog-test flash: the authorization expires after 15 minutes and on any reconnect.
+Use the `/dev/serial/by-id/...` path shown by `make discover` as `DEVICE`; `bootloader`,
+`flash` and `watchdog` refuse any other path. `flash` verifies `SHA256SUMS` before
+writing, deletes the previous `last-flash.json`, lets avrdude verify after writing, and
+then writes a flash record (see [Flash records](#flash-records-and-the-watchdog-test))
+that `make run` reports as `firmware.upload`. Run `make bootloader` immediately before
+the watchdog-test flash and `make watchdog` immediately after it: both records expire
+after 15 minutes and on any reconnect.
 
 Opening the serial port resets the Uno through DTR, whether the harness or avrdude opens
 it: the USB-serial chip pulses the reset line, the bootloader runs for about a second,
@@ -136,6 +138,46 @@ avrdude erases only on request or before writing flash, and fuses can be changed
 over ISP, never through the bootloader. The one write that follows is the sketch's own
 boot counter update after the DTR reset, described above.
 
+## Flash records and the watchdog test
+
+`make flash` deletes `reports/last-flash.json` before avrdude runs. Afterwards the harness
+writes `reports/flash-<UTC time>.json`, which `make flash` copies to `last-flash.json`.
+The record holds:
+
+- schema `glucose-guardian/flash-record/1`;
+- the variant, the image file name, the image's SHA-256 and the avrdude exit code;
+- the UTC stamp, the host boot id and a `CLOCK_BOOTTIME` time;
+- the same device and build fields as the bootloader authorization;
+- an integrity digest.
+
+The harness writes a record for a failed flash too. If writing the record fails, or the
+flash is interrupted, `last-flash.json` stays absent.
+
+`make watchdog` runs `watchdog.flash_record` first and opens the serial port only if it
+passes. The check reads `last-flash.json` itself; it does not trust anything `make
+flash` checked. It refuses unless all of these hold:
+
+- the record is readable JSON with exactly these fields, its integrity digest matches,
+  and the schema is supported;
+- the variant is `watchdog-test` and the image is `watchdog-test-DO-NOT-DEPLOY.hex`;
+- the avrdude exit code is the integer 0 (avrdude verifies after writing);
+- the recorded SHA-256 equals this build's `SHA256SUMS` entry, and the image file on disk
+  still has that hash;
+- the record is from the current host boot and between 0 and 900 s old;
+- the link, VID:PID, port path, device number and serial digest equal the selected
+  device's current ones;
+- the build commit and `SHA256SUMS` digest equal the deployed build's.
+
+On refusal the report shows `watchdog.flash_record` FAIL with the reason, the three
+watchdog checks are NOT TESTED, and `make watchdog` fails. A flash from another tool,
+such as the Arduino IDE, updates no record. The watchdog test still identifies the
+running firmware by its banner, so production or other firmware fails
+`watchdog.identity`.
+
+Records written before this schema (plain `variant`, `hex`, `sha256`,
+`avrdude_exit_code`, `utc`) are refused by `make watchdog`; `make run` still reads them
+for `firmware.upload`.
+
 ## Checks
 
 Values come from the `HARDWARE` profile in
@@ -160,6 +202,7 @@ bench criteria, not clinical or electrical limits.
 | `usb.disconnect` | Interactive: unplugging is detected as a disconnect |
 | `usb.backoff` | Interactive: during 20 s unplugged, open attempts follow 1, 2, 4, 8 s (tolerance 0.7 s) |
 | `usb.reconnect` | Interactive: after replugging, a new initial connection without an unexpected-reset flag |
+| `watchdog.flash_record` | Watchdog test only, before the port is opened: the last flash record verifies (see [Flash records](#flash-records-and-the-watchdog-test)) |
 | `watchdog.identity` | Watchdog test only: banner seen and GG1 reports received |
 | `watchdog.reset` | Two hang cycles: boot counter +1, reply gap 1.5–4.0 s, unexpected reset flagged |
 | `watchdog.cause` | Reports after the watchdog reset carry cause `W` |
@@ -188,6 +231,7 @@ bench criteria, not clinical or electrical limits.
 
 `make run` and `make watchdog` write `bench/reports/<command>-<UTC time>/` containing
 `report.md`, `report.json` and `run.log`. `make bootloader` writes
-`bench/reports/bootloader-authorization.json`. `make collect` adds kernel USB messages
-(serial numbers removed), `lsusb`, OS details and the build checksums, and packs
-everything into `bench/bench-diagnostics-<UTC time>.tar.gz`.
+`bench/reports/bootloader-authorization.json`; `make flash` writes
+`bench/reports/flash-<UTC time>.json`, `.log` and `last-flash.json`. `make collect`
+adds kernel USB messages (serial numbers removed), `lsusb`, OS details and the build
+checksums, and packs everything into `bench/bench-diagnostics-<UTC time>.tar.gz`.
