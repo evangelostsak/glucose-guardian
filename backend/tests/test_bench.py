@@ -12,7 +12,15 @@ from serial.tools.list_ports_common import ListPortInfo
 
 from glucose_guardian.bench import __main__ as cli
 from glucose_guardian.bench import checks
-from glucose_guardian.bench.checks import Bench, Profile, check_replug, run_suite, run_watchdog
+from glucose_guardian.bench.authorization import AuthorizationError
+from glucose_guardian.bench.checks import (
+    Bench,
+    Profile,
+    check_replug,
+    run_suite,
+    run_watchdog,
+    run_watchdog_verified,
+)
 from glucose_guardian.bench.discovery import candidates, describe
 from glucose_guardian.bench.probe import WATCHDOG_TEST_BANNER, open_bench_port
 from glucose_guardian.bench.report import Check, Report, Status, Target, to_markdown
@@ -202,6 +210,49 @@ def test_watchdog_command_refuses_production_firmware(emulator):
     by_id = statuses(run_watchdog(make_bench(path, emu, FAST)))
     assert by_id == {"watchdog.identity": Status.FAIL, "watchdog.reset": Status.NOT_TESTED,
                      "watchdog.cause": Status.NOT_TESTED}
+
+
+def never_open(device: str) -> serial.Serial:
+    raise AssertionError(f"port {device} opened")
+
+
+def test_watchdog_gate_refuses_before_opening_the_port(tmp_path):
+    bench = Bench(device=str(tmp_path / "ttyACM9"), physical=False, profile=FAST, session=1,
+                  clock=time.monotonic, sleep=time.sleep, open_port=never_open,
+                  reset=lambda port: None, transport_opener=open_serial,
+                  present=lambda device: True, prompt=print, interactive=False)
+
+    def refuse() -> dict[str, object]:
+        raise AuthorizationError("no flash record at last-flash.json")
+
+    results = run_watchdog_verified(bench, refuse)
+    assert statuses(results) == {"watchdog.flash_record": Status.FAIL,
+                                 "watchdog.identity": Status.NOT_TESTED,
+                                 "watchdog.reset": Status.NOT_TESTED,
+                                 "watchdog.cause": Status.NOT_TESTED}
+    assert results[0].observed == "no flash record at last-flash.json"
+
+
+def test_watchdog_gate_runs_the_test_after_verification(emulator):
+    emu, path = emulator
+    watchdog_firmware(emu, ResetCause.WATCHDOG)
+    record = {"sha256": "ab" * 32, "utc": "20261107T100500Z"}
+    results = run_watchdog_verified(make_bench(path, emu, FAST), lambda: record)
+    assert all(check.status is Status.PASS for check in results) and len(results) == 4
+    assert results[0].id == "watchdog.flash_record" and results[0].details == record
+
+
+def test_cli_watchdog_without_flash_evidence_fails_without_opening_the_port(tmp_path,
+                                                                             monkeypatch):
+    monkeypatch.setattr(cli, "open_bench_port", never_open)
+    code = cli.main(["watchdog", "--device", "/dev/serial/by-id/usb-not-attached",
+                     "--report-dir", str(tmp_path), "--flash-record",
+                     str(tmp_path / "last-flash.json"), "--build-dir", str(tmp_path / "out")])
+    assert code == cli.EXIT_FAILED
+    (run_dir,) = tmp_path.iterdir()
+    data = json.loads((run_dir / "report.json").read_text())
+    assert data["verdict"] == "FAIL"
+    assert [check["status"] for check in data["checks"]] == ["FAIL"] + ["NOT TESTED"] * 3
 
 
 class Unpluggable(PyserialPort):
