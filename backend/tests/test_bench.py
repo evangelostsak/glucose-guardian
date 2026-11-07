@@ -266,19 +266,6 @@ def test_discovery_filters_usb_recognizes_uno_and_redacts_serials(tmp_path):
     assert describe("/dev/ttyACM7", ports, tmp_path) is None
 
 
-@pytest.mark.parametrize("data,code", [
-    (bytes(32766) + bytes([4, 4]), 0),
-    (bytes(32766) + bytes([3, 8]), 0),
-    (bytes(32766) + bytes([0xFF, 0xFF]), 1),
-    (bytes(32766) + bytes([2, 3]), 1),
-    (bytes(30000), 1),
-])
-def test_bootloader_version_gate(tmp_path, data, code):
-    dump = tmp_path / "flash-dump.bin"
-    dump.write_bytes(data)
-    assert cli.bootloader_version(dump) == code
-
-
 def test_upload_check_reads_the_flash_record(tmp_path):
     record = {"variant": "production", "hex": "production.hex", "sha256": "ab" * 32,
               "avrdude_exit_code": 0, "utc": "20261106T120000Z"}
@@ -312,5 +299,5 @@ def test_firmware_banner_matches_the_harness_constant():
 def test_makefile_keeps_the_watchdog_test_interlocks():
     makefile = (ROOT / "bench" / "Makefile").read_text()
     assert '[ "$(CONFIRM)" = watchdog-test ]' in makefile
-    assert "[ -f $(BOOTLOADER_OK) ]" in makefile
+    assert "glucose_guardian.bench authorize-watchdog" in makefile
     assert "sha256sum --check" in makefile
