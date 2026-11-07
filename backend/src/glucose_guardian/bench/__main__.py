@@ -1,4 +1,4 @@
-"""Bench command line: discovery, bench suite, watchdog test and bootloader authorization."""
+"""Bench command line: discovery, suite, verified watchdog test, bootloader and flash records."""
 import argparse
 import json
 import logging
@@ -6,6 +6,7 @@ import os
 import platform
 import sys
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
@@ -16,10 +17,11 @@ from serial.tools import list_ports
 from ..serial_transport import open_serial
 from . import authorization
 from .authorization import AuthorizationError
-from .checks import HARDWARE, Bench, dtr_reset, run_suite, run_watchdog
-from .discovery import BY_ID_DIR, candidates, describe
+from .checks import HARDWARE, Bench, dtr_reset, run_suite, run_watchdog_verified
+from .discovery import BY_ID_DIR, Candidate, candidates, describe
+from .flash_record import IMAGES, verify_watchdog_flash, write_flash_record
 from .probe import open_bench_port
-from .report import Report, Status, Target, write
+from .report import Check, Report, Status, Target, write
 
 log = logging.getLogger("glucose_guardian.bench")
 
@@ -72,6 +74,19 @@ def authorize_watchdog(device: str, record: Path, build_dir: Path) -> int:
     return EXIT_OK
 
 
+def flash_record(device: str, variant: str, image: Path, build_dir: Path, exit_code: int,
+                 utc: str, record: Path) -> int:
+    try:
+        data = write_flash_record(device, variant, image, build_dir, exit_code, utc, record,
+                                  authorization.LINUX)
+    except AuthorizationError as error:
+        print(f"Flash record NOT written: {error}", file=sys.stderr)
+        return EXIT_FAILED
+    print(f"Flash record {record}: {variant}, sha256 {data['sha256'][:12]}, avrdude exit "
+          f"{exit_code}")
+    return EXIT_OK
+
+
 def read_flash_record(path: Path | None) -> dict[str, Any] | None:
     if path is None or not path.is_file():
         return None
@@ -79,8 +94,10 @@ def read_flash_record(path: Path | None) -> dict[str, Any] | None:
     return record
 
 
-def run(command: str, device: str, report_dir: Path, interactive: bool,
-        flash_record: Path | None) -> int:
+Suite = Callable[[Bench, Candidate | None], list[Check]]
+
+
+def run(command: str, device: str, report_dir: Path, interactive: bool, suite: Suite) -> int:
     started = utc_now()
     directory = report_dir / f"{command}-{started.replace(':', '')}"
     directory.mkdir(parents=True, exist_ok=True)
@@ -99,8 +116,7 @@ def run(command: str, device: str, report_dir: Path, interactive: bool,
                                                                        flush=True),
                   interactive=interactive)
     log.info("bench %s started: physical=%s profile=%s", command, physical, HARDWARE.name)
-    checks = (run_watchdog(bench) if command == "watchdog"
-              else run_suite(bench, candidate, read_flash_record(flash_record)))
+    checks = suite(bench, candidate)
     for check in checks:
         log.info("%s %s: expected %s; observed %s", check.status.value, check.id,
                  check.expected, check.observed)
@@ -132,12 +148,23 @@ def main(argv: list[str]) -> int:
         if name == "run":
             sub.add_argument("--interactive", action="store_true")
             sub.add_argument("--flash-record", type=Path)
+        else:
+            sub.add_argument("--flash-record", required=True, type=Path)
+            sub.add_argument("--build-dir", required=True, type=Path)
     for name, text in (("bootloader", "read the flash read-only and record the bootloader"),
                        ("authorize-watchdog", "check the record before watchdog-test flashing")):
         sub = commands.add_parser(name, help=text)
         sub.add_argument("--device", required=True)
         sub.add_argument("--record", required=True, type=Path)
         sub.add_argument("--build-dir", required=True, type=Path)
+    record = commands.add_parser("flash-record", help="record a flash after avrdude ran")
+    record.add_argument("--device", required=True)
+    record.add_argument("--variant", required=True, choices=sorted(IMAGES))
+    record.add_argument("--hex", required=True, type=Path)
+    record.add_argument("--build-dir", required=True, type=Path)
+    record.add_argument("--avrdude-exit-code", required=True, type=int)
+    record.add_argument("--utc", required=True)
+    record.add_argument("--record", required=True, type=Path)
     args = parser.parse_args(argv)
     if args.command == "discover":
         return discover()
@@ -145,9 +172,17 @@ def main(argv: list[str]) -> int:
         return bootloader(args.device, args.record, args.build_dir)
     if args.command == "authorize-watchdog":
         return authorize_watchdog(args.device, args.record, args.build_dir)
-    return run(args.command, args.device, args.report_dir,
-               args.command == "run" and args.interactive,
-               args.flash_record if args.command == "run" else None)
+    if args.command == "flash-record":
+        return flash_record(args.device, args.variant, args.hex, args.build_dir,
+                            args.avrdude_exit_code, args.utc, args.record)
+    if args.command == "run":
+        upload = read_flash_record(args.flash_record)
+        return run("run", args.device, args.report_dir, args.interactive,
+                   lambda bench, candidate: run_suite(bench, candidate, upload))
+    return run("watchdog", args.device, args.report_dir, False,
+               lambda bench, candidate: run_watchdog_verified(
+                   bench, lambda: verify_watchdog_flash(args.device, args.flash_record,
+                                                        args.build_dir, authorization.LINUX)))
 
 
 if __name__ == "__main__":
