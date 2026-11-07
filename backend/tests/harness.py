@@ -14,6 +14,7 @@ from glucose_guardian.protocol import (
     StateFrame,
     decode_state,
     encode_report,
+    seq_newer,
 )
 from glucose_guardian.providers import SimulatedProvider
 from glucose_guardian.runtime import Runtime
@@ -105,12 +106,28 @@ class FakeUno:
         self.cause = ResetCause.EXTERNAL
         self.silent = False
         self.corrupt = False
+        self.accept_replays = False
+        self.banner: bytes | None = None
+        self.outbox = b""
         self.states: list[StateFrame] = []
+        self._last: tuple[int, int] | None = None
         self._buffer = LineBuffer(MAX_LINE_BYTES)
 
     def reboot(self, boot: int, cause: ResetCause) -> None:
         self.boot, self.cause = boot, cause
         self.seq = self.short_presses = self.long_presses = 0
+        self._last = None
+        self._buffer.reset()
+        if self.banner is not None:
+            self.outbox += self.banner
+
+    def _accepts(self, frame: StateFrame) -> bool:
+        last = self._last
+        fresh = (last is None or frame.session != last[0] or seq_newer(frame.seq, last[1])
+                 or self.accept_replays)
+        if fresh:
+            self._last = (frame.session, frame.seq)
+        return fresh
 
     def respond(self, data: bytes) -> bytes:
         replies = b""
@@ -119,7 +136,7 @@ class FakeUno:
             if not isinstance(frame, StateFrame):
                 continue
             self.states.append(frame)
-            if self.silent:
+            if self.silent or not self._accepts(frame):
                 continue
             self.seq = (self.seq + 1) % 0x10000
             reply = encode_report(Report(
@@ -133,7 +150,7 @@ def pump(fd: int, uno: FakeUno) -> None:
     try:
         data = os.read(fd, 4096)
     except BlockingIOError:
-        return
-    reply = uno.respond(data)
+        data = b""
+    reply, uno.outbox = uno.outbox + (uno.respond(data) if data else b""), b""
     if reply:
         os.write(fd, reply)
