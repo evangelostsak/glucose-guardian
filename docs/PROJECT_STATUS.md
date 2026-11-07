@@ -48,11 +48,10 @@ M3 serial protocol v1 is complete on `feat/m3-serial-protocol`, PC-only:
 
 This resolves audit findings H3, H6, M1, M7, L3 and L4.
 
-USB-only bench tooling is complete on `feat/bench-harness`, PC-validated, not yet
-run on hardware ([BENCH.md](BENCH.md)):
+USB-only bench tooling is complete on `feat/bench-harness` ([BENCH.md](BENCH.md)):
 
 - `python -m glucose_guardian.bench` (`discover`, `run`, `watchdog`, `bootloader`,
-  `authorize-watchdog`) built on the production protocol, link, transport and runtime
+  `authorize-watchdog`, `flash-record`) built on the production protocol, link, transport and runtime
   code, with JSON and Markdown reports (PASS / FAIL / NOT TESTED, physical or
   simulated evidence, redacted serial numbers).
 - A separate `uno-watchdog-test` firmware build that announces itself and hangs on
@@ -63,19 +62,35 @@ run on hardware ([BENCH.md](BENCH.md)):
   record bound to the board's current USB connection, the host boot and the deployed
   build, at most 15 minutes old; anything missing, stale, mismatched, modified or
   malformed stops it before avrdude runs.
+- The watchdog test opens the serial port only after it has verified the last flash
+  record itself:
+  - the watchdog-test image hash matches the build's `SHA256SUMS` and the file on disk;
+  - avrdude exited 0;
+  - the record is for the same USB connection, host boot and build, and at most
+    15 minutes old;
+  - the record is intact.
+  Each flash deletes the previous record before avrdude runs.
+
+Hardware bench results, owner-reported on 2026-11-07 (Raspberry Pi 3B, Debian 13,
+genuine Uno R3). The reports stay on the Pi and are not in the repository:
+
+- the bootloader check passed: ATmega328P with Optiboot 4.4;
+- the production firmware flashed and verified (3,534 bytes) and is installed;
+- the automated and interactive USB suites passed, including disconnect, reconnect and
+  backoff: 14 PASS, 0 FAIL, 5 NOT TESTED (hardware-dependent).
 
 ## Next milestone
 
-- **Bench validation on the Pi (flashing needs approval):** run the
-  [BENCH.md](BENCH.md) workflow on the real Uno and record the reports.
-- **M4 Dexcom Share adapter,** following the roadmap: behind a configuration flag,
-  tested with synthetic recorded responses, with credentials held in systemd
-  credentials outside the repository. It requires owner approval to start.
+- **Review of the verified watchdog gate,** then the watchdog test on the Uno
+  (flashing and running it each need approval).
+- **M4 Dexcom Share adapter:** an implementation plan is proposed for review on its own
+  branch, `docs/m4-dexcom-share-plan`. Implementation starts only after the watchdog
+  changes are reviewed and the plan is approved.
 
 ## Known blockers and gaps
 
-- No Uno has been flashed: watchdog resets, reset-cause reporting with the installed
-  bootloader, and real serial timing are unverified.
+- The watchdog test has not run on hardware: watchdog resets and reset-cause
+  reporting with Optiboot 4.4 are unverified.
 - A restart forgets a retained alarm level during stale data (glucose becomes unknown
   while the missing-data fault sounds). Persisting it is an open M6 item.
 - The systemd clock check has not been run on the Pi; the simulated service takes
