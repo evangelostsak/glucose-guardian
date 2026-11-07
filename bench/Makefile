@@ -11,8 +11,8 @@ PYTHON := $(VENV)/bin/python
 REMOTE_DIR := glucose-guardian-bench
 PRODUCTION_HEX := $(OUT)/production.hex
 WATCHDOG_HEX := $(OUT)/watchdog-test-DO-NOT-DEPLOY.hex
-BOOTLOADER_OK := $(REPORTS)/bootloader-ok
-AVRDUDE = avrdude -p atmega328p -c arduino -P $(DEVICE) -b 115200
+AUTHORIZATION := $(REPORTS)/bootloader-authorization.json
+AVRDUDE = avrdude -p atmega328p -c arduino -b 115200 -P $(DEVICE)
 
 require = $(if $($(1)),,$(error $(1) is required: $(2)))
 
@@ -20,9 +20,9 @@ require = $(if $($(1)),,$(error $(1) is required: $(2)))
 
 help:
 	@echo "Laptop: make build | make deploy PI=user@host"
-	@echo "Pi:     make setup | make discover | make bootloader DEVICE=..."
-	@echo "        make flash DEVICE=... VARIANT=production"
+	@echo "Pi:     make setup | make discover | make flash DEVICE=... VARIANT=production"
 	@echo "        make run DEVICE=... | make run-interactive DEVICE=..."
+	@echo "        make bootloader DEVICE=/dev/serial/by-id/..."
 	@echo "        make flash DEVICE=... VARIANT=watchdog-test CONFIRM=watchdog-test"
 	@echo "        make watchdog DEVICE=... | make restore DEVICE=... | make collect"
 
@@ -57,16 +57,8 @@ discover:
 
 bootloader:
 	$(call require,DEVICE,DEVICE=/dev/serial/by-id/...)
-	mkdir -p $(REPORTS)
-	rm -f $(BOOTLOADER_OK)
-	$(AVRDUDE) -U flash:r:$(REPORTS)/flash-dump.bin:r
-	set +e
-	$(PYTHON) -m glucose_guardian.bench bootloader-version $(REPORTS)/flash-dump.bin
-	status=$$?
-	set -e
-	rm -f $(REPORTS)/flash-dump.bin
-	if [ $$status -eq 0 ]; then touch $(BOOTLOADER_OK); fi
-	exit $$status
+	$(PYTHON) -m glucose_guardian.bench bootloader --device $(DEVICE) --build-dir $(OUT) \
+	  --record $(AUTHORIZATION)
 
 flash:
 	$(call require,DEVICE,DEVICE=/dev/serial/by-id/...)
@@ -75,7 +67,8 @@ flash:
 	  production) hex=$(PRODUCTION_HEX) ;;
 	  watchdog-test)
 	    [ "$(CONFIRM)" = watchdog-test ] || { echo "watchdog-test needs CONFIRM=watchdog-test" >&2; exit 2; }
-	    [ -f $(BOOTLOADER_OK) ] || { echo "run 'make bootloader' successfully first" >&2; exit 2; }
+	    $(PYTHON) -m glucose_guardian.bench authorize-watchdog --device $(DEVICE) \
+	      --build-dir $(OUT) --record $(AUTHORIZATION)
 	    hex=$(WATCHDOG_HEX) ;;
 	  *) echo "unknown VARIANT $(VARIANT)" >&2; exit 2 ;;
 	esac
