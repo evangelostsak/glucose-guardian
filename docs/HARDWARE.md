@@ -50,8 +50,9 @@ Approved as starting values on 2026-11-06; all require bench validation.
 
 ## Bench validation checklist (requires separate approval)
 
-No Uno has been flashed with this firmware. Before outputs exist, a bench session with
-nothing connected to any output should confirm:
+No Uno has been flashed with this firmware. The procedure and tooling are in
+[BENCH.md](BENCH.md). Before outputs exist, a bench session with nothing connected to
+any output should confirm:
 
 1. The serial link to the Pi transport: frames, replies and reconnection after unplug.
 2. A deliberately hung `loop()` (test build) resets the Uno in about 2 s, the boot
