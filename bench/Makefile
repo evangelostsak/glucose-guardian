@@ -63,6 +63,10 @@ bootloader:
 flash:
 	$(call require,DEVICE,DEVICE=/dev/serial/by-id/...)
 	$(call require,VARIANT,VARIANT=production or VARIANT=watchdog-test)
+	case "$(DEVICE)" in
+	  /dev/serial/by-id/*) ;;
+	  *) echo "DEVICE must be a /dev/serial/by-id link" >&2; exit 2 ;;
+	esac
 	case "$(VARIANT)" in
 	  production) hex=$(PRODUCTION_HEX) ;;
 	  watchdog-test)
@@ -74,14 +78,15 @@ flash:
 	esac
 	(cd $(OUT) && sha256sum --check --ignore-missing SHA256SUMS)
 	mkdir -p $(REPORTS)
+	rm -f $(REPORTS)/last-flash.json
 	stamp=$$(date -u +%Y%m%dT%H%M%SZ)
 	set +e
 	$(AVRDUDE) -D -U flash:w:$$hex:i 2>&1 | tee $(REPORTS)/flash-$$stamp.log
 	code=$${PIPESTATUS[0]}
 	set -e
-	printf '{"variant": "%s", "hex": "%s", "sha256": "%s", "avrdude_exit_code": %d, "utc": "%s"}\n' \
-	  "$(VARIANT)" "$$(basename $$hex)" "$$(sha256sum $$hex | cut -d' ' -f1)" "$$code" "$$stamp" \
-	  > $(REPORTS)/flash-$$stamp.json
+	$(PYTHON) -m glucose_guardian.bench flash-record --device $(DEVICE) --variant $(VARIANT) \
+	  --hex $$hex --build-dir $(OUT) --avrdude-exit-code $$code --utc $$stamp \
+	  --record $(REPORTS)/flash-$$stamp.json
 	cp $(REPORTS)/flash-$$stamp.json $(REPORTS)/last-flash.json
 	echo "flash record: $(REPORTS)/flash-$$stamp.json (avrdude exit $$code)"
 	exit $$code
@@ -102,7 +107,8 @@ run-interactive:
 
 watchdog:
 	$(call require,DEVICE,DEVICE=/dev/serial/by-id/...)
-	$(PYTHON) -m glucose_guardian.bench watchdog --device $(DEVICE) --report-dir $(REPORTS)
+	$(PYTHON) -m glucose_guardian.bench watchdog --device $(DEVICE) --report-dir $(REPORTS) \
+	  --flash-record $(REPORTS)/last-flash.json --build-dir $(OUT)
 
 collect:
 	stamp=$$(date -u +%Y%m%dT%H%M%SZ)
