@@ -1,6 +1,6 @@
 # Project status
 
-Updated: 2026-11-06
+Updated: 2026-11-07
 
 ## Current implementation
 
@@ -51,15 +51,18 @@ This resolves audit findings H3, H6, M1, M7, L3 and L4.
 USB-only bench tooling is complete on `feat/bench-harness`, PC-validated, not yet
 run on hardware ([BENCH.md](BENCH.md)):
 
-- `python -m glucose_guardian.bench` (`discover`, `run`, `watchdog`,
-  `bootloader-version`) built on the production protocol, link, transport and runtime
+- `python -m glucose_guardian.bench` (`discover`, `run`, `watchdog`, `bootloader`,
+  `authorize-watchdog`) built on the production protocol, link, transport and runtime
   code, with JSON and Markdown reports (PASS / FAIL / NOT TESTED, physical or
   simulated evidence, redacted serial numbers).
 - A separate `uno-watchdog-test` firmware build that announces itself and hangs on
   purpose; the production image is byte-identical to `main`.
 - `bench/Makefile` for build, deploy, setup, discovery, read-only bootloader check,
-  checksum-verified flashing with a watchdog-test interlock, runs, restore and
-  diagnostics collection.
+  checksum-verified flashing, runs, restore and diagnostics collection.
+- Watchdog-test flashing needs `CONFIRM=watchdog-test` and a bootloader authorization
+  record bound to the board's current USB connection, the host boot and the deployed
+  build, at most 15 minutes old; anything missing, stale, mismatched, modified or
+  malformed stops it before avrdude runs.
 
 ## Next milestone
 
