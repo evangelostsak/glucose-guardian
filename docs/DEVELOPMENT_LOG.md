@@ -1,5 +1,74 @@
 # Development log
 
+## 2026-11-07 — Device-bound bootloader authorization
+
+### Changes and decisions
+
+- Review finding: the watchdog-test interlock relied on a plain marker file,
+  `bench/reports/bootloader-ok`, that was not tied to any board, so a check on one
+  Uno could authorize flashing another.
+- New `glucose_guardian.bench.authorization`. `make bootloader` now runs the read-only
+  avrdude dump itself, between two identity resolutions. It writes
+  `bench/reports/bootloader-authorization.json` with:
+  - the `/dev/serial/by-id` link (serial redacted), VID:PID, USB port path, kernel
+    device number and a digest of the serial number;
+  - the Optiboot classification, version, marker and boot-section digest;
+  - the host boot id, UTC and `CLOCK_BOOTTIME` verification times;
+  - the build commit and `SHA256SUMS` digest, and the harness and avrdude versions;
+  - an integrity digest.
+- `make flash VARIANT=watchdog-test` keeps `CONFIRM=watchdog-test` and replaces the
+  marker test with `authorize-watchdog`. It rejects a record that is missing,
+  unreadable, malformed, modified, of another schema, from an earlier host boot, older
+  than 900 s or dated in the future, for another link, USB id, port, device number or
+  serial, for another build, or without Optiboot 4 or later.
+- Decision: every record is bound to the current USB connection (port path and device
+  number), not only records for boards without a serial number. Any reconnect
+  therefore needs a new check. This closes cloned-serial mix-ups, and the check takes
+  seconds and only reads.
+- `DEVICE` must be a `/dev/serial/by-id` link for `bootloader` and the watchdog-test
+  flash; tty names are refused. Boards sharing VID:PID and serial number (or both
+  lacking one) are refused while both are attached.
+- The `bootloader-version` command is replaced by `bootloader` and
+  `authorize-watchdog`. The Makefile's avrdude arguments were reordered to match the
+  harness read command; a test keeps them equal.
+- Validity window 900 s: re-checking is cheap, and the window bounds an undetected ISP
+  bootloader replacement during a session. It is a bench procedure value, not a
+  hardware limit.
+
+### Hardware and protocol record
+
+- No firmware, protocol, GPIO, actuator or alarm-policy change. Production hex
+  unchanged (sha256 `4b36ab28…`, identical to `main`).
+- Documented in `docs/BENCH.md`: opening the port resets the Uno through DTR. After
+  that reset the production sketch increments its EEPROM boot counter. The bootloader
+  read itself issues no erase, write, verify, fuse or EEPROM operation.
+
+### Validation
+
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean (23 files), pytest 331
+  passed. That includes 44 new authorization tests (replacing the 5 `bootloader-version`
+  cases) covering:
+  - valid authorization;
+  - the exact read-only avrdude command;
+  - failed classification, avrdude failure and a connection change during the read;
+  - another board, another serial and a reconnect (with and without a serial number);
+  - age, future dating, host reboot and build change;
+  - modified, re-signed but invalid, and malformed records;
+  - tty names, dangling links, non-USB ports and ambiguous identities;
+  - a Makefile run with a fake avrdude, showing avrdude never runs a memory operation
+    without `CONFIRM` and a valid authorization.
+- Mutation check: removing any of 16 safeguards (13 in the module, 3 in the Makefile)
+  fails the suite.
+- Firmware: `pio run -e uno` and `-e uno-watchdog-test` succeed; `pio test -e native`
+  23 of 23.
+- **No hardware validation yet.** Nothing has run against a physical Uno.
+
+### Unresolved issues
+
+- The integrity digest detects edits, not deliberate forgery by a local user.
+- A board swap between the authorization check and avrdude opening the port, or an
+  ISP bootloader replacement without a reconnect, is not detected.
+
 ## 2026-11-06 — USB-only Uno bench tooling
 
 ### Changes and decisions
