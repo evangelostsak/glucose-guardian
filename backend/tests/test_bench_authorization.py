@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -9,7 +10,7 @@ from pathlib import Path
 import pytest
 from harness import ROOT
 
-from glucose_guardian.bench import authorization
+from glucose_guardian.bench import authorization, checks, flash_record
 from glucose_guardian.bench.authorization import (
     AVRDUDE_BASE,
     MAX_AGE_S,
@@ -18,6 +19,8 @@ from glucose_guardian.bench.authorization import (
     authorize,
     check_bootloader,
 )
+from glucose_guardian.bench.flash_record import verify_watchdog_flash, write_flash_record
+from glucose_guardian.bench.report import Status
 
 SERIAL = "75834353130351D0C1A1"
 OPTIBOOT_4_4 = bytes(32766) + bytes([4, 4])
@@ -32,15 +35,24 @@ class Bench:
                           "by-id", "dev", "out"):
             (root / directory).mkdir(parents=True)
         (root / "boot_id").write_text("boot-a\n")
-        (root / "out" / "SHA256SUMS").write_text("ab  watchdog-test-DO-NOT-DEPLOY.hex\n")
+        self.out = root / "out"
+        self.build(b":00000001FF\n")
         (root / "out" / "BUILD-COMMIT").write_text("45a33bb\n")
         self.host = Host(by_id_dir=root / "by-id", sysfs=root / "sys",
                          boot_id=root / "boot_id", clock=lambda: self.now)
         self.record = root / "reports" / "bootloader-authorization.json"
-        self.out = root / "out"
+        self.flash = root / "reports" / "last-flash.json"
         self.calls: list[list[str]] = []
         hub = self.attach_dir("usb1", "1d6b", "0002", None, 1)
         (root / "sys" / "bus" / "usb" / "devices" / "usb1").symlink_to(hub)
+
+    def build(self, watchdog_image: bytes) -> None:
+        images = {"production.hex": b":10000000PRODUCTION\n",
+                  "watchdog-test-DO-NOT-DEPLOY.hex": watchdog_image}
+        for name, content in images.items():
+            (self.out / name).write_bytes(content)
+        (self.out / "SHA256SUMS").write_text("".join(
+            f"{hashlib.sha256(content).hexdigest()}  {name}\n" for name, content in images.items()))
 
     def attach_dir(self, port: str, vid: str, pid: str, serial: str | None,
                    devnum: int) -> Path:
@@ -100,12 +112,23 @@ class Bench:
         return authorize(device, self.record, self.out, self.host)
 
     def rewrite(self, change: Callable[[dict[str, object]], None], resign: bool) -> None:
-        data = json.loads(self.record.read_text())
-        change(data)
-        if resign:
-            body = {key: value for key, value in data.items() if key != "integrity_sha256"}
-            data["integrity_sha256"] = authorization._digest(body)
-        self.record.write_text(json.dumps(data))
+        rewrite(self.record, change, resign)
+
+    def flashed(self, device: str, variant: str, image: str, code: int) -> dict[str, object]:
+        return write_flash_record(device, variant, self.out / image, self.out, code,
+                                  "20261107T100500Z", self.flash, self.host)
+
+    def verify_flash(self, device: str) -> dict[str, object]:
+        return verify_watchdog_flash(device, self.flash, self.out, self.host)
+
+
+def rewrite(path: Path, change: Callable[[dict[str, object]], None], resign: bool) -> None:
+    data = json.loads(path.read_text())
+    change(data)
+    if resign:
+        body = {key: value for key, value in data.items() if key != "integrity_sha256"}
+        data["integrity_sha256"] = authorization.digest(body)
+    path.write_text(json.dumps(data))
 
 
 @pytest.fixture
@@ -348,11 +371,12 @@ def test_identity_lost_after_the_check_is_rejected(bench):
         bench.authorize(device)
 
 
-def make(tmp_path: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+def make(tmp_path: Path, avrdude_exit: int, *arguments: str) -> subprocess.CompletedProcess[str]:
     tools = tmp_path / "bin"
     tools.mkdir(exist_ok=True)
     fake = tools / "avrdude"
-    fake.write_text(f'#!/bin/sh\ncase "$*" in *-U*) echo "$@" >> {tmp_path}/avrdude.log;; esac\n')
+    fake.write_text(f'#!/bin/sh\ncase "$*" in *-U*) echo "$@" >> {tmp_path}/avrdude.log;; esac\n'
+                    f"exit {avrdude_exit}\n")
     fake.chmod(0o755)
     return subprocess.run(
         ["make", "-s", "-C", str(ROOT / "bench"), f"PYTHON={sys.executable}",
@@ -363,11 +387,198 @@ def make(tmp_path: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_makefile_never_runs_avrdude_without_confirmation_and_authorization(tmp_path):
-    unconfirmed = make(tmp_path, "flash", "VARIANT=watchdog-test")
+    unconfirmed = make(tmp_path, 0, "flash", "VARIANT=watchdog-test")
     assert unconfirmed.returncode != 0 and "needs CONFIRM=watchdog-test" in unconfirmed.stderr
-    refused = make(tmp_path, "flash", "VARIANT=watchdog-test", "CONFIRM=watchdog-test")
+    refused = make(tmp_path, 0, "flash", "VARIANT=watchdog-test", "CONFIRM=watchdog-test")
     assert refused.returncode != 0
     assert "REFUSED: no bootloader authorization" in refused.stderr
-    check = make(tmp_path, "bootloader")
+    check = make(tmp_path, 0, "bootloader")
     assert check.returncode != 0 and "Bootloader check FAILED" in check.stderr
     assert not (tmp_path / "avrdude.log").exists()
+
+
+WATCHDOG_HEX = "watchdog-test-DO-NOT-DEPLOY.hex"
+
+
+def test_verified_watchdog_flash_record_is_accepted(bench):
+    device = bench.uno()
+    bench.flashed(device, "watchdog-test", WATCHDOG_HEX, 0)
+    text = bench.flash.read_text()
+    data = json.loads(text)
+    assert SERIAL not in text
+    assert (data["variant"], data["hex"], data["avrdude_exit_code"]) == \
+        ("watchdog-test", WATCHDOG_HEX, 0)
+    assert data["sha256"] == hashlib.sha256((bench.out / WATCHDOG_HEX).read_bytes()).hexdigest()
+    assert (data["device"]["usb_port"], data["device"]["devnum"]) == ("1-1.3", 5)
+    bench.now += flash_record.MAX_AGE_S
+    assert bench.verify_flash(device) == data
+
+
+def test_flash_record_still_feeds_the_upload_check(bench):
+    device = bench.uno()
+    record = bench.flashed(device, "production", "production.hex", 0)
+    assert checks.check_upload(record).status is Status.PASS
+
+
+@pytest.mark.parametrize("variant,image,code,reason", [
+    ("production", "production.hex", 0, "not the watchdog-test image"),
+    ("watchdog-test", WATCHDOG_HEX, 1, r"did not succeed \(avrdude exit 1\)"),
+])
+def test_recorded_production_or_failed_flash_is_refused(bench, variant, image, code, reason):
+    device = bench.uno()
+    bench.flashed(device, variant, image, code)
+    with pytest.raises(AuthorizationError, match=reason):
+        bench.verify_flash(device)
+
+
+@pytest.mark.parametrize("variant,image", [
+    ("watchdog-test", "production.hex"),
+    ("production", WATCHDOG_HEX),
+    ("bootloader", WATCHDOG_HEX),
+])
+def test_flash_record_writer_refuses_an_image_of_another_variant(bench, variant, image):
+    device = bench.uno()
+    with pytest.raises(AuthorizationError, match="is not the"):
+        bench.flashed(device, variant, image, 0)
+    assert not bench.flash.exists()
+
+
+def tamper_image(bench: Bench) -> None:
+    (bench.out / WATCHDOG_HEX).write_bytes(b":00000001FE\n")
+
+
+def drop_sums(bench: Bench) -> None:
+    (bench.out / "SHA256SUMS").unlink()
+
+
+def garble_sums(bench: Bench) -> None:
+    (bench.out / "SHA256SUMS").write_text("not a checksum line\n")
+
+
+def unlist_image(bench: Bench) -> None:
+    sums = bench.out / "SHA256SUMS"
+    sums.write_text(sums.read_text().splitlines()[0] + "\n")
+
+
+@pytest.mark.parametrize("change,reason", [
+    (expire, "flash record age 901 s is outside"),
+    (rewind, "flash record age -1 s is outside"),
+    (reboot, "flash record is from an earlier boot"),
+    (lambda bench: bench.replug("1-1.3"), r"another board or connection \(devnum differ\)"),
+    (lambda bench: bench.build(b":00000001FD\n"), "differs from this build's watchdog-test"),
+    (tamper_image, "does not match SHA256SUMS"),
+    (drop_sums, "cannot read"),
+    (garble_sums, "malformed"),
+    (unlist_image, "does not list"),
+    (recommit, "bench build changed since the flash record"),
+])
+def test_stale_or_mismatched_flash_evidence_is_refused(bench, change, reason):
+    device = bench.uno()
+    bench.flashed(device, "watchdog-test", WATCHDOG_HEX, 0)
+    change(bench)
+    with pytest.raises(AuthorizationError, match=reason):
+        bench.verify_flash(device)
+
+
+def test_flash_record_for_another_board_is_refused(bench):
+    flashed = bench.uno()
+    other = bench.attach("1-1.2", "ttyACM1", "2341", "0043", "95536333535351E0B0C2",
+                         "usb-Arduino__www.arduino.cc__0043_95536333535351E0B0C2-if00", False)
+    bench.flashed(flashed, "watchdog-test", WATCHDOG_HEX, 0)
+    with pytest.raises(AuthorizationError, match="flash record is for another board"):
+        bench.verify_flash(other)
+
+
+@pytest.mark.parametrize("change", [
+    lambda data: data.update(variant="production"),
+    lambda data: data.update(sha256="0" * 64),
+    lambda data: data.update(avrdude_exit_code=1),
+    lambda data: data.update(hex="production.hex"),
+    lambda data: data.update(flashed_boottime_s=data["flashed_boottime_s"] + 600),
+    lambda data: data["device"].update(devnum=6),
+])
+def test_modified_flash_record_is_refused(bench, change):
+    device = bench.uno()
+    bench.flashed(device, "watchdog-test", WATCHDOG_HEX, 0)
+    rewrite(bench.flash, change, resign=False)
+    with pytest.raises(AuthorizationError, match="flash record was modified after it was written"):
+        bench.verify_flash(device)
+
+
+@pytest.mark.parametrize("change,reason", [
+    (lambda data: data.update(variant="production"), "not the watchdog-test image"),
+    (lambda data: data.update(hex="production.hex"), "not the watchdog-test image"),
+    (lambda data: data.update(avrdude_exit_code=1), "did not succeed"),
+    (lambda data: data.update(avrdude_exit_code=True), "did not succeed"),
+    (lambda data: data.update(avrdude_exit_code=False), "did not succeed"),
+    (lambda data: data.update(avrdude_exit_code=0.0), "did not succeed"),
+    (lambda data: data.update(avrdude_exit_code="0"), "did not succeed"),
+    (lambda data: data.update(avrdude_exit_code=None), "did not succeed"),
+    (lambda data: data.update(sha256="0" * 64), "differs from this build's"),
+    (lambda data: data.update(schema="glucose-guardian/flash-record/2"),
+     "unsupported flash schema"),
+    (lambda data: data.update(flashed_boottime_s="1000.0"), "flashed_boottime_s"),
+    (lambda data: data.update(device={}), "malformed flash record: device"),
+    (lambda data: data["build"].update(extra="x"), "malformed flash record: build"),
+])
+def test_resigned_but_invalid_flash_record_is_refused(bench, change, reason):
+    device = bench.uno()
+    bench.flashed(device, "watchdog-test", WATCHDOG_HEX, 0)
+    rewrite(bench.flash, change, resign=True)
+    with pytest.raises(AuthorizationError, match=reason):
+        bench.verify_flash(device)
+
+
+LEGACY_RECORD = json.dumps({"variant": "watchdog-test", "hex": WATCHDOG_HEX, "sha256": "ab" * 32,
+                            "avrdude_exit_code": 0, "utc": "20261107T100500Z"})
+
+
+@pytest.mark.parametrize("content", ["", "not json", "[]", "\udcff", LEGACY_RECORD])
+def test_malformed_or_legacy_flash_record_is_refused(bench, content):
+    device = bench.uno()
+    bench.flash.parent.mkdir()
+    bench.flash.write_bytes(content.encode(errors="surrogateescape"))
+    with pytest.raises(AuthorizationError, match="unreadable flash record|malformed flash record"):
+        bench.verify_flash(device)
+
+
+def test_missing_flash_record_is_refused(bench):
+    with pytest.raises(AuthorizationError, match="no flash record"):
+        bench.verify_flash(bench.uno())
+
+
+def test_flash_record_without_identity_is_refused(bench):
+    device = bench.uno()
+    bench.flashed(device, "watchdog-test", WATCHDOG_HEX, 0)
+    (bench.root / "dev" / "ttyACM0").unlink()
+    with pytest.raises(AuthorizationError, match="does not point to an attached device"):
+        bench.verify_flash(device)
+
+
+def test_makefile_watchdog_refuses_without_a_verified_flash_record(tmp_path):
+    result = make(tmp_path, 0, "watchdog")
+    assert result.returncode != 0 and "Verdict: FAIL" in result.stdout
+    (report,) = (tmp_path / "reports").glob("watchdog-*/report.json")
+    found = {check["id"]: check for check in json.loads(report.read_text())["checks"]}
+    assert found["watchdog.flash_record"]["status"] == "FAIL"
+    record = tmp_path / "reports" / "last-flash.json"
+    assert f"no flash record at {record};" in found["watchdog.flash_record"]["observed"]
+    assert {found[key]["status"] for key in
+            ("watchdog.identity", "watchdog.reset", "watchdog.cause")} == {"NOT TESTED"}
+
+
+def test_makefile_flash_needs_a_by_id_device(tmp_path):
+    result = make(tmp_path, 0, "flash", "VARIANT=production", "DEVICE=/dev/ttyACM0")
+    assert result.returncode != 0 and "must be a /dev/serial/by-id link" in result.stderr
+    assert not (tmp_path / "avrdude.log").exists()
+
+
+def test_makefile_flash_discards_the_previous_record_before_writing(tmp_path):
+    Bench(tmp_path)
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "last-flash.json").write_text(LEGACY_RECORD)
+    result = make(tmp_path, 1, "flash", "VARIANT=production")
+    assert result.returncode != 0 and "Flash record NOT written" in result.stderr
+    assert (tmp_path / "avrdude.log").read_text().count("flash:w:") == 1
+    assert not (reports / "last-flash.json").exists()
