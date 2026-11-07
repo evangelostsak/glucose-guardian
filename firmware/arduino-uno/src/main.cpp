@@ -28,6 +28,14 @@ const bool kButtonPressed = false;
 guardian::Controller controller;
 char reply[guardian::kMaxFrameBytes];
 
+#ifdef GUARDIAN_WATCHDOG_TEST
+const uint32_t kTestHangAfterMs = 20000;
+const uint32_t kTestBannerPeriodMs = 5000;
+uint32_t lastBannerMs = 0;
+
+void printTestBanner() { Serial.print(F("GGTEST WATCHDOG-HANG FIRMWARE NOT FOR USE\n")); }
+#endif
+
 }
 
 void setup() {
@@ -36,6 +44,9 @@ void setup() {
   eeprom_update_word(kBootIdAddress, bootId);
   Serial.begin(115200);
   controller.begin(bootId, guardian::resetCause(resetFlags), millis());
+#ifdef GUARDIAN_WATCHDOG_TEST
+  printTestBanner();
+#endif
 }
 
 void loop() {
@@ -50,4 +61,15 @@ void loop() {
   controller.button(kButtonPressed, now);
   const guardian::Demand demand = controller.demand(now);
   (void)demand;
+#ifdef GUARDIAN_WATCHDOG_TEST
+  if (now - lastBannerMs >= kTestBannerPeriodMs) {
+    lastBannerMs = now;
+    printTestBanner();
+  }
+  if (now >= kTestHangAfterMs) {
+    for (;;) {
+      __asm__ __volatile__("");
+    }
+  }
+#endif
 }
