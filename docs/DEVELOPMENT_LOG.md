@@ -1,5 +1,80 @@
 # Development log
 
+## 2026-11-07 — Verified flash evidence before the watchdog test
+
+### Changes and decisions
+
+- Owner-reported hardware results (Pi 3B, Debian 13, genuine Uno R3; the reports stay
+  on the Pi):
+  - bootloader check PASS with Optiboot 4.4;
+  - production flash PASS (3,534 bytes, verified);
+  - automated and interactive USB suites PASS, 14 PASS, 0 FAIL, 5 NOT TESTED.
+  The production firmware is installed.
+- Review request: the watchdog test entry point trusted whatever was flashed. It
+  checked no flash record, no image hash and no flash status.
+- New `glucose_guardian.bench.flash_record`:
+  - after avrdude runs, `make flash` calls `flash-record`, which writes a record of the
+    image name, its SHA-256 and the avrdude exit code;
+  - the record also holds the same device, host boot and build fields as the bootloader
+    authorization, and an integrity digest.
+- `make watchdog` now runs a `watchdog.flash_record` check first and opens the port only
+  if it passes. The check refuses a record that is:
+  - missing, unreadable, malformed, modified or of another schema (including records in
+    the earlier format);
+  - for a variant other than `watchdog-test` or another image name;
+  - for an exit code other than the integer 0 (`false` and `0.0` are refused);
+  - for a hash that differs from the build's `SHA256SUMS` entry, or for an image file
+    that no longer matches it;
+  - from an earlier host boot, older than 900 s or dated in the future;
+  - for another link, USB id, port, device number, serial or build.
+  On refusal the report shows the reason and marks the three watchdog checks NOT
+  TESTED.
+- `make flash` deletes `last-flash.json` before avrdude runs, so an interrupted flash or
+  a failed record write leaves no stale evidence. It now requires a `/dev/serial/by-id`
+  `DEVICE` for every variant, because every record is bound to the device.
+- Shared record loading and binding checks (`load_record`, `check_binding`,
+  `write_record`) moved into `authorization.py`. The authorization messages now read
+  "authorization record …"; behavior is unchanged.
+- Window 900 s: the watchdog test is the step after the flash, and a flash by another
+  tool on the same connection leaves no record; the window bounds that gap. It is a
+  bench procedure value, not a hardware limit.
+- `make run` still reads earlier-format records for `firmware.upload`.
+
+### Hardware and protocol record
+
+- No firmware, protocol, GPIO, actuator or alarm-policy change. Production hex
+  unchanged (sha256 `4b36ab28…`).
+
+### Validation
+
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean (24 files), pytest 381
+  passed (50 new):
+  - flash records: valid, upload-check compatibility, production or failed flash,
+    writer variant mismatch;
+  - stale and mismatched evidence: age, future, reboot, reconnect, rebuild, image
+    tampered on disk, `SHA256SUMS` missing, malformed or without the entry, build
+    commit change;
+  - another board; modified, re-signed but invalid, malformed and earlier-format
+    records; missing records and lost identity;
+  - the gate refusing before the port opens, and passing a verified record to the
+    watchdog test against the emulator;
+  - the CLI writing a failing report without opening the port;
+  - Makefile runs with a fake avrdude: the watchdog refusal names
+    `reports/last-flash.json`; a tty `DEVICE` is refused before avrdude; the previous
+    record is gone after a failed flash.
+- Mutation check: removing any of 16 new safeguards fails the suite. The first run
+  found a surviving mutation (a wrong record path in the watchdog target); the
+  Makefile test now checks the path.
+- Firmware: `pio run -e uno` and `-e uno-watchdog-test` succeed; `pio test -e native`
+  23 of 23.
+- No hardware was touched for this change.
+
+### Unresolved issues
+
+- The watchdog test itself has not run on hardware.
+- The owner-reported totals cover 19 checks; the suite run reports 20 (15 that can
+  pass plus 5 always NOT TESTED). To be reconciled with the report.
+
 ## 2026-11-07 — Device-bound bootloader authorization
 
 ### Changes and decisions
