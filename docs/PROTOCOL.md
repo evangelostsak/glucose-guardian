@@ -141,6 +141,10 @@ All values are provisional until bench validation.
 | Debounce, long press, stuck | 50 ms, 2 s, 30 s | Button classification |
 | Hardware watchdog | 2 s | Fed once per `loop()`; a hung loop resets the Uno |
 
+The watchdog-test build (`uno-watchdog-test`, never for deployment) additionally
+prints `GGTEST WATCHDOG-HANG FIRMWARE NOT FOR USE` lines, which the Pi rejects as
+malformed, and hangs 20 s after boot. See [BENCH.md](BENCH.md).
+
 While link-lost, the Uno demands its link-lost alarm (`fault = true`, `glucose = -`)
 independently of the Pi. Hardware outputs are not implemented; the demand is computed
 and tested but drives no pin.
