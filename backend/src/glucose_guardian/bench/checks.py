@@ -16,6 +16,7 @@ from ..providers import SimulatedProvider
 from ..runtime import Runtime
 from ..serial_transport import Opener, Port, SerialTransport
 from ..worker import run_inline
+from .authorization import AuthorizationError
 from .discovery import Candidate
 from .probe import BENCH_STATE, Probe, Reply
 from .report import Check, Status
@@ -147,6 +148,10 @@ RECONNECT = ("usb.reconnect", "USB reconnect",
              "after replugging, the transport reconnects as an initial connection")
 BACKOFF = ("usb.backoff", "Reconnect backoff",
            "open attempts while unplugged follow initial, doubling, capped intervals")
+WATCHDOG_FLASH = ("watchdog.flash_record", "Watchdog-test flash evidence",
+                  "last flash record: watchdog-test image matching this build's SHA256SUMS and "
+                  "the file on disk, avrdude exit 0, this board's current USB connection, this "
+                  "host boot and build, at most 900 s old, integrity intact")
 WATCHDOG_IDENTITY = ("watchdog.identity", "Watchdog-test firmware identity",
                      "watchdog-test banner seen and GG1 reports received")
 WATCHDOG_RESET = ("watchdog.reset", "Hardware watchdog reset",
@@ -609,3 +614,16 @@ def run_watchdog(bench: Bench) -> list[Check]:
                         {"note": "U means the bootloader cleared MCUSR before the sketch "
                                  "read it (see docs/HARDWARE.md)"})
     return [identity, reset, cause]
+
+
+def run_watchdog_verified(bench: Bench, verify: Callable[[], dict[str, Any]]) -> list[Check]:
+    try:
+        record = verify()
+    except AuthorizationError as error:
+        return [Check(*WATCHDOG_FLASH, Status.FAIL, str(error), "flash-record", 0.0, {}),
+                *(not_tested(spec, "flash record not verified; the port was not opened")
+                  for spec in (WATCHDOG_IDENTITY, WATCHDOG_RESET, WATCHDOG_CAUSE))]
+    evidence = Check(*WATCHDOG_FLASH, Status.PASS,
+                     f"watchdog-test image sha256 {record['sha256'][:12]} flashed at "
+                     f"{record['utc']}, avrdude exit 0", "flash-record", 0.0, record)
+    return [evidence, *run_watchdog(bench)]
