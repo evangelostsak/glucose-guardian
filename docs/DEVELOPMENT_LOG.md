@@ -1,5 +1,56 @@
 # Development log
 
+## 2026-11-06 — USB-only Uno bench tooling
+
+### Changes and decisions
+
+- New `glucose_guardian.bench` package:
+  - `discovery` lists USB serial devices with Uno VID:PID recognition and serial-number
+    redaction;
+  - `probe` runs bounded real-time exchanges through the production encoder and `Link`;
+  - `checks` holds the suite, the watchdog test and the `HARDWARE` profile;
+  - `report` writes JSON and Markdown.
+- Checks report PASS, FAIL or NOT TESTED, with evidence `physical-usb`, `simulated` or
+  `flash-record`. Reports against non-USB targets carry a "not hardware validation"
+  banner.
+- Unexpected and repeated resets are driven by DTR pulses on hardware. USB
+  disconnect, backoff and reconnect use the production `SerialTransport` and need an
+  interactive run with physical cable access.
+- The Uno's link-lost alarm is reported as NOT TESTED: nothing is observable without
+  outputs. A diagnostic report flag is proposed for separate approval.
+- Watchdog test: separate PlatformIO env `uno-watchdog-test` (`-DGUARDIAN_WATCHDOG_TEST`)
+  prints an identifying banner and hangs 20 s after boot. The production hex is
+  byte-identical to `main` (sha256 `4b36ab28…`). Flashing it requires
+  `CONFIRM=watchdog-test` and a passed read-only bootloader check (Optiboot ≥ 4),
+  because older bootloaders can reset-loop after a watchdog reset.
+- `bench/Makefile` covers build, deploy (rsync), setup (Debian packages and a venv),
+  discover, bootloader, flash (checksum-verified, flash record), run,
+  run-interactive, watchdog, restore and collect.
+- The test emulator `FakeUno` now follows the firmware's acceptance rules (newer
+  frames per session, a session change accepted at once) and can emit unsolicited
+  lines.
+- CI also builds the watchdog-test image.
+
+### Hardware and protocol record
+
+- No GPIO assignment, actuator activation, alarm-policy or protocol change. The
+  watchdog-test banner is documented in `docs/PROTOCOL.md`.
+
+### Validation
+
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean (22 files), pytest 292
+  passed. The 20 bench tests passed 10 consecutive runs.
+- Firmware: `pio run -e uno` and `-e uno-watchdog-test` succeed; `pio test -e native`
+  23 of 23.
+- `make build` produced both images; Makefile guards verified for missing variables,
+  missing `CONFIRM`, a missing bootloader check, unknown variants and a tampered image.
+- **No hardware validation yet.** Nothing has run against a physical Uno.
+
+### Unresolved issues
+
+- Hardware execution on the Pi is pending (flashing needs owner approval).
+- Uno link-lost alarm observability needs a protocol diagnostic or outputs.
+
 ## 2026-11-06 — M3 review fix: backoff across short-lived connections
 
 ### Changes and decisions
