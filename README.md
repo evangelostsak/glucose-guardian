@@ -46,6 +46,8 @@ flashed with this firmware.
 - `firmware/arduino-uno/`: PlatformIO firmware: protocol v1, link supervision,
   button classification and watchdog; no pins assigned and outputs disabled.
 - `config/example.toml`: secret-free example settings.
+- `bench/`: Makefile for the USB-only Uno bench (build, deploy, flash, run, collect);
+  see [docs/BENCH.md](docs/BENCH.md).
 - `deployment/systemd/`: inactive, uninstalled service template (M6).
 - `docs/`: [architecture](docs/ARCHITECTURE.md), [serial protocol](docs/PROTOCOL.md),
   [safety](docs/SAFETY.md), and [electrical interface](docs/HARDWARE.md).
