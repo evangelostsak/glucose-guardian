@@ -12,9 +12,10 @@ needs no siren, shaker, button, driver or display.
 - No glucose data: the harness sends a fixed synthetic "normal, nothing audible" state.
 - Results against a pseudo-terminal or emulator are **simulated** and are never
   hardware validation. Every report records `physical: true` only for a USB device.
-- The watchdog-test firmware hangs on purpose. It is flashed only after the bootloader
-  check passes and with an explicit `CONFIRM`, and production firmware is restored
-  afterwards.
+- The watchdog-test firmware hangs on purpose. It is flashed only with an explicit
+  `CONFIRM` and a bootloader authorization recorded for the same board connection, host
+  boot and bench build (see [Bootloader authorization](#bootloader-authorization)), and
+  production firmware is restored afterwards.
 
 ## Components
 
@@ -51,18 +52,89 @@ On the Pi, in `~/glucose-guardian-bench/bench`:
 |---|---|---|
 | Install dependencies, create venv | `make setup` | no |
 | List USB serial devices | `make discover` | no |
-| Check the bootloader (read-only flash dump) | `make bootloader DEVICE=...` | reads only |
 | Flash production firmware | `make flash DEVICE=... VARIANT=production` | **writes flash** |
 | Automatic bench suite | `make run DEVICE=...` | DTR resets only |
 | Suite plus cable replug steps | `make run-interactive DEVICE=...` | you unplug and replug |
+| Check the bootloader (read-only flash dump) | `make bootloader DEVICE=...` | DTR reset, reads flash |
 | Flash watchdog-test firmware | `make flash DEVICE=... VARIANT=watchdog-test CONFIRM=watchdog-test` | **writes flash** |
 | Watchdog test | `make watchdog DEVICE=...` | deliberate hangs |
 | Restore production firmware | `make restore DEVICE=...` | **writes flash** |
 | Collect diagnostics | `make collect` | no |
 
-Use the `/dev/serial/by-id/...` path shown by `make discover` as `DEVICE`. `flash`
-verifies `SHA256SUMS` before writing, lets avrdude verify after writing, and stores a
-flash record that `make run` reports as `firmware.upload`.
+Use the `/dev/serial/by-id/...` path shown by `make discover` as `DEVICE`; `bootloader`
+and the watchdog-test `flash` refuse any other path. `flash` verifies `SHA256SUMS`
+before writing, lets avrdude verify after writing, and stores a flash record that
+`make run` reports as `firmware.upload`. Run `make bootloader` immediately before the
+watchdog-test flash: the authorization expires after 15 minutes and on any reconnect.
+
+Opening the serial port resets the Uno through DTR, whether the harness or avrdude opens
+it: the USB-serial chip pulses the reset line, the bootloader runs for about a second,
+then the installed sketch starts. The production sketch increments its EEPROM boot
+counter on every start, including these.
+
+## Bootloader authorization
+
+`make bootloader DEVICE=/dev/serial/by-id/...`:
+
+1. Resolves the link through sysfs to its USB device: VID:PID, USB serial number if the
+   board has one, USB port path and the kernel device number. It refuses a tty name
+   such as `/dev/ttyACM0`, a link to nothing, a non-USB port, and a board whose VID:PID
+   and serial number (or absence of one) another attached USB device shares.
+2. Runs exactly `avrdude -p atmega328p -c arduino -b 115200 -P DEVICE -U
+   flash:r:reports/flash-dump.bin:r`, with a 60 s timeout.
+3. Resolves the device again and refuses if anything changed during the read.
+4. Accepts only a 32768-byte dump whose Optiboot version marker (major at `0x7FFF`,
+   minor at `0x7FFE`) is 4 or later and not `0xFF`. avrdude omits trailing erased
+   bytes, so a bootloader without the marker yields a shorter dump.
+5. Deletes the dump and writes `reports/bootloader-authorization.json`.
+
+An earlier record is deleted first, so a failed check leaves no authorization.
+
+The record holds:
+
+| Field | Content |
+|---|---|
+| `schema` | `glucose-guardian/bootloader-authorization/1` |
+| `verified_utc`, `verified_boottime_s` | Verification time: UTC for people, `CLOCK_BOOTTIME` for the age check |
+| `host_boot_id` | The Pi's `/proc/sys/kernel/random/boot_id` |
+| `device` | `/dev/serial/by-id` link (serial redacted), USB VID:PID, USB port path, kernel device number, SHA-256 of boot id and serial number (`null` without one) |
+| `bootloader` | `optiboot`, version, marker bytes, SHA-256 of the 512-byte boot section, dump size |
+| `build` | `out/BUILD-COMMIT` and the SHA-256 of `out/SHA256SUMS` |
+| `tooling` | Harness version, avrdude version (`null` if unknown) |
+| `integrity_sha256` | SHA-256 of all other fields |
+
+`make flash VARIANT=watchdog-test CONFIRM=watchdog-test` checks `CONFIRM`, then accepts
+the record only if all of these hold; otherwise it stops before avrdude runs:
+
+- it is readable JSON with exactly these fields, its integrity digest matches, and the
+  schema is supported;
+- it is from the current host boot and between 0 and 900 s old;
+- the link, VID:PID, port path, device number and serial digest equal the selected
+  device's current ones;
+- the build commit and `SHA256SUMS` digest equal the deployed build's;
+- the recorded marker still shows Optiboot 4 or later.
+
+Limits:
+
+- **Every record is bound to one USB connection**, with or without a serial number:
+  the kernel assigns a new device number on every reconnect. Reconnecting the board,
+  rebooting the Pi, deploying a new build or waiting more than 15 minutes requires a
+  new `make bootloader`. Without a serial number (common on CH340 clones) the
+  connection is the only identity; neither case proves that a reconnected board is
+  the board that was checked.
+- The integrity digest detects edits and corruption. It is not a signature: a local
+  user who recomputes it can forge a record. The record guards against mistakes, such
+  as the wrong board, an old record or a changed build.
+- A bootloader replaced over ISP without a USB reconnect is not detected; the
+  15-minute limit bounds that window. A board swapped in the milliseconds between the
+  check and avrdude opening the port is not detected either; a reconnect takes longer.
+- Serial numbers appear only redacted or as a digest.
+
+The read is read-only: the command has a single flash read operation and no erase
+(`-e`), write, verify or EEPROM operation, and a test pins the exact command line.
+avrdude erases only on request or before writing flash, and fuses can be changed only
+over ISP, never through the bootloader. The one write that follows is the sketch's own
+boot counter update after the DTR reset, described above.
 
 ## Checks
 
@@ -115,6 +187,7 @@ bench criteria, not clinical or electrical limits.
 ## Outputs
 
 `make run` and `make watchdog` write `bench/reports/<command>-<UTC time>/` containing
-`report.md`, `report.json` and `run.log`. `make collect` adds kernel USB messages (serial
-numbers removed), `lsusb`, OS details and the build checksums, and packs everything into
-`bench/bench-diagnostics-<UTC time>.tar.gz`.
+`report.md`, `report.json` and `run.log`. `make bootloader` writes
+`bench/reports/bootloader-authorization.json`. `make collect` adds kernel USB messages
+(serial numbers removed), `lsusb`, OS details and the build checksums, and packs
+everything into `bench/bench-diagnostics-<UTC time>.tar.gz`.
