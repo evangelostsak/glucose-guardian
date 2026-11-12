@@ -30,7 +30,7 @@ Approved as starting values on 2026-11-06; all require bench validation.
 | Button debounce | 50 ms |
 | Long press | 2 s |
 | Stuck button | 30 s |
-| Hardware watchdog | 2 s (`WDTO_2S`) |
+| Hardware watchdog | 2 × 1 s, interrupt then reset (`WDTO_1S` with `WDIE`) |
 | Startup grace before link-lost | 10 s |
 | Heartbeat timeout | 5 s |
 | Local link-lost silence | 60 s, not extendable |
@@ -42,24 +42,36 @@ Approved as starting values on 2026-11-06; all require bench validation.
   reboots.
 - The Uno increments a 16-bit boot counter in EEPROM address 0 at every start (one
   `eeprom_update_word` per boot, well inside the EEPROM's rated write endurance).
-- The stock Uno bootloader (Optiboot) clears the MCU reset flags before the sketch
-  runs, so the reported reset cause may be `U`; resets are still detected by the boot
-  counter.
+- The stock Uno bootloader, Optiboot 4.4 (version marker read on the bench board),
+  clears MCUSR before the sketch runs. This is confirmed in the Arduino core's
+  `optiboot.c` and its compiled listing (`in r24, MCUSR`, `out MCUSR, r1`, then
+  `ldi r24, 0` in `appStart`). Every reset therefore reaches the sketch with empty
+  flags. The firmware reports `W` from a watchdog-interrupt marker in `.noinit` RAM;
+  any other reset reports `U`. The boot counter detects every reset. Owner-reported
+  bench result before this marker (2026-11-12): two watchdog resets detected, cause
+  `U`, `U`.
+- After an external reset (DTR or the reset button), Optiboot 4.4 itself leaves
+  through a watchdog reset. Its 1 s timeout, or 16 ms after a programming session,
+  starts the sketch. Reset flags, even if a bootloader preserved them, would therefore
+  show a watchdog reset after every DTR reset. The marker does not, because only the
+  sketch's interrupt writes it.
 - The Uno is the only audible path. If it is powered solely by the Pi's USB port, a
   Pi power failure silences both (audit H5); the power topology is not yet decided.
 
 ## Bench validation checklist (requires separate approval)
 
-No Uno has been flashed with this firmware. The procedure and tooling are in
+The production firmware passed the USB bench (owner-reported 2026-11-07). The
+procedure and tooling are in
 [BENCH.md](BENCH.md). Before outputs exist, a bench session with nothing connected to
 any output should confirm:
 
 1. The serial link to the Pi transport: frames, replies and reconnection after unplug.
-2. A deliberately hung `loop()` (test build) resets the Uno in about 2 s, the boot
-   counter increments, and the Pi raises `controller_reset`.
-3. The reset cause reported after power-on, DTR, reset button and watchdog reset with
-   the installed bootloader.
-4. RAM and stack headroom (static RAM is 382 of 2048 bytes) and loop timing under
+2. A deliberately hung `loop()` (test build) resets the Uno in about 2 s, with
+   interrupts enabled and with interrupts disabled. The boot counter increments and
+   the Pi raises `controller_reset`.
+3. The reset cause: `W` after an interrupts-enabled hang, `U` after an
+   interrupts-disabled hang and after DTR resets.
+4. RAM and stack headroom (static RAM is 390 of 2048 bytes) and loop timing under
    continuous traffic.
 5. With the Uno stalled or unplugged mid-write, an incomplete write leads to discard,
    close and reconnect without blocking the Pi loop. In particular, `close()` must not
