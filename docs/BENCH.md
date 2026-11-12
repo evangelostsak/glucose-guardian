@@ -37,9 +37,13 @@ boot and every 5 s, and hangs 20 s after boot so the two-stage hardware watchdog
 resets it. On an even boot counter it hangs with interrupts enabled, so the watchdog
 interrupt records a `W` marker. On an odd one it hangs with interrupts disabled, so the
 interrupt cannot run and only the second stage resets it. The two hang cycles of
-`make watchdog` cover both. The production image is the same with and without this
-code, because it is excluded at compile time. A production `run`
-that sees the banner fails `firmware.identity` and stops.
+`make watchdog` cover both.
+
+This test-only code is excluded from the production build at compile time. The
+production image contains neither the banner nor the deliberate hang. Production and
+watchdog-test images are different binaries with different SHA-256 hashes (see
+[Validation record](#validation-record)). A production `run` that sees the banner
+fails `firmware.identity` and stops.
 
 ## Workflow
 
@@ -263,11 +267,20 @@ The bench:
 | Date | Run | Firmware | Verdict |
 |---|---|---|---|
 | 2026-11-07 | Bootloader check | — | PASS (Optiboot 4.4) |
-| 2026-11-07 | Automated and interactive suites | earlier production image `4b36ab28…` | PASS (reported as 14 PASS, 0 FAIL, 5 NOT TESTED) |
-| 2026-11-12 | Watchdog test, bench build `48a6c65` | single-stage watchdog | FAIL: `watchdog.cause` `U`, `U`; led to the reset-cause fix |
+| 2026-11-07 | Automated and interactive suites | earlier production image `4b36ab28…` (original 2 s reset-only watchdog) | PASS (reported as 14 PASS, 0 FAIL, 5 NOT TESTED) |
+| 2026-11-12 | Watchdog test, bench build `48a6c65` | watchdog-test image with the original 2 s reset-only watchdog | FAIL on `watchdog.cause` only: `U`, `U`. `watchdog.reset` passed (2 of 2 resets); led to the reset-cause fix |
 | 2026-11-12 | `watchdog-2026-11-12T101301Z`, build `475deaa` | watchdog-test image | PASS |
 | 2026-11-12 | `run-2026-11-12T101456Z`, build `475deaa` | production `bde6b740…` | PASS |
 | 2026-11-12 | `run-2026-11-12T102024Z` (interactive), build `475deaa` | production `bde6b740…` | PASS |
+
+The watchdog changed between these runs:
+
+- **Up to `48a6c65`:** a 2 s reset-only watchdog (`WDTO_2S`).
+- **From the reset-cause fix (validated at `475deaa`):** two 1 s stages, an interrupt
+  that records the `W` marker, then a reset.
+
+The `48a6c65` run failed reset-cause reporting, not watchdog recovery: both of its
+hangs reset the Uno, but Optiboot 4.4 had cleared the reset flags, so both reported `U`.
 
 Watchdog test `watchdog-2026-11-12T101301Z`:
 
