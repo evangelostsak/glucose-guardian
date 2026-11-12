@@ -1,5 +1,398 @@
 # Development log
 
+## 2026-11-12 — M3 hardware bench validation recorded
+
+### Results (owner-reported from the physical bench)
+
+The bench:
+
+- Raspberry Pi 3B, Debian 13;
+- genuine Arduino Uno R3 (ATmega328P, USB `2341:0043`) with nothing on its pins;
+- stock Optiboot 4.4. The boot-section SHA-256
+  `e36d971b54b3336178813bf16cddf2658866367874587f7fc6c560fb629fbc74` equals the stock
+  Arduino image, which confirms that the 2026-11-12 analysis applies to this board.
+
+The reports stay on the Pi.
+
+- **Watchdog test** `watchdog-2026-11-12T101301Z` (build `475deaa`), PASS:
+  - `watchdog.flash_record` and `watchdog.identity` PASS;
+  - `watchdog.reset` PASS, 2 of 2, gaps 2.243 s and 2.243 s;
+  - `watchdog.cause` PASS, observed `U`, `W`, expected `U`, `W`.
+
+  Both hang modes recovered. That confirms on hardware the datasheet behavior the fix
+  relies on: a second time-out resets the MCU when the interrupt could not run.
+- **Production firmware** restored, verified and installed: SHA-256
+  `bde6b74088c52eb5483af3cfc2a3a6ef437fb9bdbeec7d7ba3d9d2d4442450db`.
+- **Noninteractive run** `run-2026-11-12T101456Z`, PASS:
+  - exchanges 50 of 50, no anomalies, p95 20.2 ms;
+  - session change, rejection, heartbeat pause and unexpected reset PASS;
+  - repeated resets 5 of 5, longest recovery 0.732 s;
+  - burst 500 of 500 at 43.9 exchanges/s;
+  - sustained 600 ticks, max lateness 4.04 ms, no communication fault after warm-up,
+    CPU 1.3%.
+- **Interactive run** `run-2026-11-12T102024Z`, PASS:
+  - exchanges 50 of 50, p95 20.21 ms;
+  - repeated resets 5 of 5, longest recovery 0.731 s;
+  - burst 500 of 500;
+  - sustained 600 ticks, max lateness 3.98 ms, no communication fault after warm-up,
+    CPU 1.3%;
+  - USB disconnect, reconnect and backoff PASS, with delays 0.801, 2.003, 4.005 and
+    8.008 s against 1, 2, 4 and 8 s.
+
+NOT TESTED by design: `link.uno_alarm` and `hardware.*`; in the noninteractive run also
+the USB replug checks. The owner's summary did not itemize the remaining checks; the
+PASS verdicts mean none failed.
+
+### Changes and decisions
+
+- Documentation only: `BENCH.md` (validation record), `HARDWARE.md` (validation status
+  and outstanding physical checks), `PROTOCOL.md` (reset-cause confirmation),
+  `SAFETY.md` (bench status of the link, reset and hang rows) and `PROJECT_STATUS.md`
+  (M3 bench validation complete, M3 merged as PR #5, next steps).
+- M3 hardware bench validation is recorded as complete for the firmware and serial
+  link over USB. The physical alarm system is not validated. Outstanding:
+  - the Uno link-lost alarm output;
+  - buzzer and bed-shaker integration;
+  - the physical button;
+  - power-loss resilience;
+  - the Waveshare 800×480 display.
+
+### Review
+
+- Watchdog behavior and the reset-cause documentation agree across `PROTOCOL.md`,
+  `HARDWARE.md`, `SAFETY.md`, `ARCHITECTURE.md` and `BENCH.md`: two 1 s stages, `W`
+  only from the marker, `U` otherwise with Optiboot 4.4.
+- Watchdog-test separation:
+  - a rebuild of `475deaa` gives production `bde6b740…`, identical to the installed
+    image;
+  - the production ELF contains no `GGTEST` banner, and its only endless loop is
+    avr-libc's `__stop_program`;
+  - the test image contains the banner and the deliberate hang;
+  - the harness fails `firmware.identity` on the banner and fails `firmware.upload`
+    for a watchdog-test flash record;
+  - `make restore` flashes only the production variant.
+- Flash safety checks are unchanged since `48a6c65`: `CONFIRM`, the device-bound
+  bootloader authorization, the verified flash record, `SHA256SUMS`, and by-id device
+  paths.
+- The branch adds no binaries, reports, archives or secrets. `bench/out/`,
+  `bench/reports/` and diagnostics archives are ignored. The serial numbers in tests
+  are synthetic.
+- CI ran ruff, mypy and pytest on 3.11 and 3.13, both firmware builds and the native
+  tests; it passed on `475deaa`.
+
+### Validation
+
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean (24 files), pytest 383
+  passed.
+- Firmware: `pio run -e uno` and `-e uno-watchdog-test` succeed (production 390 bytes
+  RAM, 3764 bytes flash); `pio test -e native` 27 of 27.
+
+### Unresolved issues
+
+- The 2026-11-07 totals were reported as 14 PASS, 0 FAIL and 5 NOT TESTED, which is 19
+  checks; a suite run reports 20. They remain unreconciled; the 2026-11-12 runs
+  supersede them.
+- With Optiboot 4.4, `P`, `B` and `E` are unavailable. A watchdog reset during a Pi
+  disconnection is not reported after reconnection.
+- Not exercised on the bench: a write stalled mid-transfer, stack headroom, brown-out
+  and reset-button resets.
+
+## 2026-11-12 — Watchdog reset cause with Optiboot 4.4
+
+### Findings
+
+Owner-reported watchdog test (bench build `48a6c65`, genuine Uno R3, Optiboot 4.4):
+`watchdog.reset` passed, 2 of 2 resets with 2.243 s gaps; `watchdog.cause` failed,
+`U`, `U` instead of `W`.
+
+Confirmed:
+
+- Optiboot 4.4 destroys the reset flags before the sketch runs. In the Arduino core's
+  `optiboot.c` (version 4.4) and the compiled listing `optiboot_atmega328.lst`, the
+  entry runs `in r24, MCUSR`, `out MCUSR, r1` (zero), then `rcall appStart` for any
+  non-external reset. `appStart` loads `r24` with 0 for `watchdogConfig(WATCHDOG_OFF)`
+  and jumps to address 0, so no copy of the flags reaches the sketch.
+- The application capture is not at fault. In the firmware ELF, `resetFlags` is in
+  `.noinit` (`0x027D`), the `.init3` code stores MCUSR there before the C runtime runs,
+  and `__do_clear_bss` stops at `0x027D`. It stores the zero Optiboot left.
+- `resetCause(0)` returns `U` by design, and GG1 carries the character unchanged; the
+  Pi parsed `U` correctly.
+- The boot counter and the Pi's reset detection work independently of the cause:
+  `watchdog.reset` passed with boot +1 and the unexpected reset flagged.
+- After an external reset (DTR, reset button), Optiboot 4.4 leaves through its own
+  watchdog reset (1 s timeout, or 16 ms after programming). Reset flags, even if a
+  bootloader preserved them, would show a watchdog reset after every DTR reset.
+
+Classification: a bootloader limitation that the firmware did not compensate for, not
+an application capture defect. The test expectation of `W` was right in intent, since
+the firmware should report a watchdog reset, but not achievable from MCUSR on this
+bootloader.
+
+Not confirmed:
+
+- That the bench board runs exactly this Optiboot binary. The version marker 4.4 was
+  read; the boot-section hash is still to be compared. The stock image gives
+  `region_sha256` `e36d971b54b3336178813bf16cddf2658866367874587f7fc6c560fb629fbc74`.
+- That a second time-out with the interrupt not executed resets the MCU. This is the
+  ATmega328P datasheet's description of interrupt-and-reset mode; the new test run
+  checks it.
+
+### Changes and decisions
+
+- `lib/guardian/reset_cause`: `ResetMarker` (value `0x57444F47` with its complement),
+  `armWatchdogMarker`, `clearResetMarker`, `takeWatchdogMarker` (validates, then
+  clears), and `resetCause(mcusr, watchdogMarker)`. The MCUSR priority is unchanged
+  (`P`, `W`, `B`, `E`, `U`), and the marker counts as `W` after `P`.
+- `src/main.cpp`:
+  - `WDTO_1S` with `WDIE`: interrupt-and-reset mode;
+  - `ISR(WDT_vect)` writes the marker to `.noinit`;
+  - `setup()` takes the marker before starting the watchdog;
+  - `loop()` feeds the watchdog and, if the interrupt fired (`WDIE` cleared by
+    hardware), clears the marker and re-arms `WDIE`.
+  The time to reset stays about 2 s (two 1 s stages instead of one 2 s stage).
+- Rejected alternatives:
+  - reading a register left over by the bootloader: there is none, and it would report
+    `W` after every DTR reset;
+  - a 2 s interrupt stage plus a forced reset: an interrupts-disabled hang would take
+    4 s;
+  - replacing the bootloader: not allowed.
+- The watchdog-test build hangs with interrupts disabled on odd boot counters and
+  enabled on even ones. The harness expects `W` and `U` respectively, and records the
+  hang mode and expected cause per cycle.
+- Unchanged: GG1, the Pi link, the flash safety checks, the boot counter, and the
+  bench gap window (1.5–4.0 s).
+
+### Hardware and protocol record
+
+- Firmware behavior change: watchdog mode and reset-cause source. Production hex
+  sha256 `bde6b74088c52eb5483af3cfc2a3a6ef437fb9bdbeec7d7ba3d9d2d4442450db`
+  (previously `4b36ab28…`); watchdog-test hex `9e194d48…`. RAM 390 bytes (+8 for the
+  marker), flash 3764 bytes.
+- No GPIO, output, alarm-policy or GG1 format change. `PROTOCOL.md`, `HARDWARE.md`,
+  `SAFETY.md`, `ARCHITECTURE.md` and `BENCH.md` updated.
+
+### Validation
+
+- Native firmware tests 27 of 27 (4 new): `W` from the marker with cleared flags,
+  power-on precedence, the marker reported once, a recovered stall clears it, and
+  power-on RAM patterns rejected.
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean, pytest 383 passed (2
+  new). The emulator reproduces the hardware result (`U`, `U`, FAIL), a firmware
+  reporting `W` without interrupt evidence (FAIL), and both hang modes per run.
+- Mutation check: all 9 mutations of the marker logic, the cause mapping, the harness
+  expectations and the test-build hang mode fail the suite.
+- Disassembly of the production ELF:
+  - the ISR writes `47 4F 44 57` and its complement to `0x027E`, outside Optiboot's
+    page buffer (`0x0100`–`0x017F`);
+  - `setup()` writes `WDTCSR` `0x18`, `0x0E`, then sets `WDIE`;
+  - `loop()` clears the marker and re-arms.
+- `pio run -e uno` and `-e uno-watchdog-test` succeed. Not run on hardware.
+
+### Unresolved issues
+
+- Hardware verification of `W`, and of recovery from an interrupts-disabled hang.
+- With Optiboot 4.4, `P`, `B` and `E` are unavailable. A watchdog reset during a Pi
+  disconnection is not reported after reconnection, because the DTR reset at port
+  open starts a new boot. Keeping `W` until the Pi acknowledges it would be a protocol
+  change for separate approval.
+- If an external reset arrives within 1 s after a first-stage interrupt, its boot
+  reports `W`. The device had stalled for at least 1 s in that case.
+
+## 2026-11-07 — Verified flash evidence before the watchdog test
+
+### Changes and decisions
+
+- Owner-reported hardware results (Pi 3B, Debian 13, genuine Uno R3; the reports stay
+  on the Pi):
+  - bootloader check PASS with Optiboot 4.4;
+  - production flash PASS (3,534 bytes, verified);
+  - automated and interactive USB suites PASS, 14 PASS, 0 FAIL, 5 NOT TESTED.
+  The production firmware is installed.
+- Review request: the watchdog test entry point trusted whatever was flashed. It
+  checked no flash record, no image hash and no flash status.
+- New `glucose_guardian.bench.flash_record`:
+  - after avrdude runs, `make flash` calls `flash-record`, which writes a record of the
+    image name, its SHA-256 and the avrdude exit code;
+  - the record also holds the same device, host boot and build fields as the bootloader
+    authorization, and an integrity digest.
+- `make watchdog` now runs a `watchdog.flash_record` check first and opens the port only
+  if it passes. The check refuses a record that is:
+  - missing, unreadable, malformed, modified or of another schema (including records in
+    the earlier format);
+  - for a variant other than `watchdog-test` or another image name;
+  - for an exit code other than the integer 0 (`false` and `0.0` are refused);
+  - for a hash that differs from the build's `SHA256SUMS` entry, or for an image file
+    that no longer matches it;
+  - from an earlier host boot, older than 900 s or dated in the future;
+  - for another link, USB id, port, device number, serial or build.
+  On refusal the report shows the reason and marks the three watchdog checks NOT
+  TESTED.
+- `make flash` deletes `last-flash.json` before avrdude runs, so an interrupted flash or
+  a failed record write leaves no stale evidence. It now requires a `/dev/serial/by-id`
+  `DEVICE` for every variant, because every record is bound to the device.
+- Shared record loading and binding checks (`load_record`, `check_binding`,
+  `write_record`) moved into `authorization.py`. The authorization messages now read
+  "authorization record …"; behavior is unchanged.
+- Window 900 s: the watchdog test is the step after the flash, and a flash by another
+  tool on the same connection leaves no record; the window bounds that gap. It is a
+  bench procedure value, not a hardware limit.
+- `make run` still reads earlier-format records for `firmware.upload`.
+
+### Hardware and protocol record
+
+- No firmware, protocol, GPIO, actuator or alarm-policy change. Production hex
+  unchanged (sha256 `4b36ab28…`).
+
+### Validation
+
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean (24 files), pytest 381
+  passed (50 new):
+  - flash records: valid, upload-check compatibility, production or failed flash,
+    writer variant mismatch;
+  - stale and mismatched evidence: age, future, reboot, reconnect, rebuild, image
+    tampered on disk, `SHA256SUMS` missing, malformed or without the entry, build
+    commit change;
+  - another board; modified, re-signed but invalid, malformed and earlier-format
+    records; missing records and lost identity;
+  - the gate refusing before the port opens, and passing a verified record to the
+    watchdog test against the emulator;
+  - the CLI writing a failing report without opening the port;
+  - Makefile runs with a fake avrdude: the watchdog refusal names
+    `reports/last-flash.json`; a tty `DEVICE` is refused before avrdude; the previous
+    record is gone after a failed flash.
+- Mutation check: removing any of 16 new safeguards fails the suite. The first run
+  found a surviving mutation (a wrong record path in the watchdog target); the
+  Makefile test now checks the path.
+- Firmware: `pio run -e uno` and `-e uno-watchdog-test` succeed; `pio test -e native`
+  23 of 23.
+- No hardware was touched for this change.
+
+### Unresolved issues
+
+- The watchdog test itself has not run on hardware.
+- The owner-reported totals cover 19 checks; the suite run reports 20 (15 that can
+  pass plus 5 always NOT TESTED). To be reconciled with the report.
+
+## 2026-11-07 — Device-bound bootloader authorization
+
+### Changes and decisions
+
+- Review finding: the watchdog-test interlock relied on a plain marker file,
+  `bench/reports/bootloader-ok`, that was not tied to any board, so a check on one
+  Uno could authorize flashing another.
+- New `glucose_guardian.bench.authorization`. `make bootloader` now runs the read-only
+  avrdude dump itself, between two identity resolutions. It writes
+  `bench/reports/bootloader-authorization.json` with:
+  - the `/dev/serial/by-id` link (serial redacted), VID:PID, USB port path, kernel
+    device number and a digest of the serial number;
+  - the Optiboot classification, version, marker and boot-section digest;
+  - the host boot id, UTC and `CLOCK_BOOTTIME` verification times;
+  - the build commit and `SHA256SUMS` digest, and the harness and avrdude versions;
+  - an integrity digest.
+- `make flash VARIANT=watchdog-test` keeps `CONFIRM=watchdog-test` and replaces the
+  marker test with `authorize-watchdog`. It rejects a record that is missing,
+  unreadable, malformed, modified, of another schema, from an earlier host boot, older
+  than 900 s or dated in the future, for another link, USB id, port, device number or
+  serial, for another build, or without Optiboot 4 or later.
+- Decision: every record is bound to the current USB connection (port path and device
+  number), not only records for boards without a serial number. Any reconnect
+  therefore needs a new check. This closes cloned-serial mix-ups, and the check takes
+  seconds and only reads.
+- `DEVICE` must be a `/dev/serial/by-id` link for `bootloader` and the watchdog-test
+  flash; tty names are refused. Boards sharing VID:PID and serial number (or both
+  lacking one) are refused while both are attached.
+- The `bootloader-version` command is replaced by `bootloader` and
+  `authorize-watchdog`. The Makefile's avrdude arguments were reordered to match the
+  harness read command; a test keeps them equal.
+- Validity window 900 s: re-checking is cheap, and the window bounds an undetected ISP
+  bootloader replacement during a session. It is a bench procedure value, not a
+  hardware limit.
+
+### Hardware and protocol record
+
+- No firmware, protocol, GPIO, actuator or alarm-policy change. Production hex
+  unchanged (sha256 `4b36ab28…`, identical to `main`).
+- Documented in `docs/BENCH.md`: opening the port resets the Uno through DTR. After
+  that reset the production sketch increments its EEPROM boot counter. The bootloader
+  read itself issues no erase, write, verify, fuse or EEPROM operation.
+
+### Validation
+
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean (23 files), pytest 331
+  passed. That includes 44 new authorization tests (replacing the 5 `bootloader-version`
+  cases) covering:
+  - valid authorization;
+  - the exact read-only avrdude command;
+  - failed classification, avrdude failure and a connection change during the read;
+  - another board, another serial and a reconnect (with and without a serial number);
+  - age, future dating, host reboot and build change;
+  - modified, re-signed but invalid, and malformed records;
+  - tty names, dangling links, non-USB ports and ambiguous identities;
+  - a Makefile run with a fake avrdude, showing avrdude never runs a memory operation
+    without `CONFIRM` and a valid authorization.
+- Mutation check: removing any of 16 safeguards (13 in the module, 3 in the Makefile)
+  fails the suite.
+- Firmware: `pio run -e uno` and `-e uno-watchdog-test` succeed; `pio test -e native`
+  23 of 23.
+- **No hardware validation yet.** Nothing has run against a physical Uno.
+
+### Unresolved issues
+
+- The integrity digest detects edits, not deliberate forgery by a local user.
+- A board swap between the authorization check and avrdude opening the port, or an
+  ISP bootloader replacement without a reconnect, is not detected.
+
+## 2026-11-06 — USB-only Uno bench tooling
+
+### Changes and decisions
+
+- New `glucose_guardian.bench` package:
+  - `discovery` lists USB serial devices with Uno VID:PID recognition and serial-number
+    redaction;
+  - `probe` runs bounded real-time exchanges through the production encoder and `Link`;
+  - `checks` holds the suite, the watchdog test and the `HARDWARE` profile;
+  - `report` writes JSON and Markdown.
+- Checks report PASS, FAIL or NOT TESTED, with evidence `physical-usb`, `simulated` or
+  `flash-record`. Reports against non-USB targets carry a "not hardware validation"
+  banner.
+- Unexpected and repeated resets are driven by DTR pulses on hardware. USB
+  disconnect, backoff and reconnect use the production `SerialTransport` and need an
+  interactive run with physical cable access.
+- The Uno's link-lost alarm is reported as NOT TESTED: nothing is observable without
+  outputs. A diagnostic report flag is proposed for separate approval.
+- Watchdog test: separate PlatformIO env `uno-watchdog-test` (`-DGUARDIAN_WATCHDOG_TEST`)
+  prints an identifying banner and hangs 20 s after boot. The production hex is
+  byte-identical to `main` (sha256 `4b36ab28…`). Flashing it requires
+  `CONFIRM=watchdog-test` and a passed read-only bootloader check (Optiboot ≥ 4),
+  because older bootloaders can reset-loop after a watchdog reset.
+- `bench/Makefile` covers build, deploy (rsync), setup (Debian packages and a venv),
+  discover, bootloader, flash (checksum-verified, flash record), run,
+  run-interactive, watchdog, restore and collect.
+- The test emulator `FakeUno` now follows the firmware's acceptance rules (newer
+  frames per session, a session change accepted at once) and can emit unsolicited
+  lines.
+- CI also builds the watchdog-test image.
+
+### Hardware and protocol record
+
+- No GPIO assignment, actuator activation, alarm-policy or protocol change. The
+  watchdog-test banner is documented in `docs/PROTOCOL.md`.
+
+### Validation
+
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean (22 files), pytest 292
+  passed. The 20 bench tests passed 10 consecutive runs.
+- Firmware: `pio run -e uno` and `-e uno-watchdog-test` succeed; `pio test -e native`
+  23 of 23.
+- `make build` produced both images; Makefile guards verified for missing variables,
+  missing `CONFIRM`, a missing bootloader check, unknown variants and a tampered image.
+- **No hardware validation yet.** Nothing has run against a physical Uno.
+
+### Unresolved issues
+
+- Hardware execution on the Pi is pending (flashing needs owner approval).
+- Uno link-lost alarm observability needs a protocol diagnostic or outputs.
+
 ## 2026-11-06 — M3 review fix: backoff across short-lived connections
 
 ### Changes and decisions

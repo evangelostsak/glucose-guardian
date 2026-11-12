@@ -1,11 +1,12 @@
 # Project status
 
-Updated: 2026-11-06
+Updated: 2026-11-12
 
 ## Current implementation
 
 `main` holds the initial scaffold and repository audit (PR #1), M0 housekeeping
-(PR #2), M1 alarm policy v2 (PR #3) and M2 simulated end-to-end runtime (PR #4). CI
+(PR #2), M1 alarm policy v2 (PR #3), M2 simulated end-to-end runtime (PR #4) and M3
+serial protocol v1 (PR #5). CI
 runs ruff, strict mypy and pytest on Python 3.11 and 3.13 plus the Uno build. `main` is
 protected and requires one approving review; status checks are deliberately not
 required.
@@ -16,7 +17,7 @@ required.
   workers, strict TOML configuration, eleven deterministic scenarios, display and
   transport doubles, and a simulated service entry point.
 
-M3 serial protocol v1 is complete on `feat/m3-serial-protocol`, PC-only:
+M3 serial protocol v1 (merged in PR #5; hardware bench validation below):
 
 - **Protocol v1** ([PROTOCOL.md](PROTOCOL.md)): CRC-16 framed ASCII lines of at most
   64 bytes with version, session and sequence numbers. The Pi's state frame, sent from
@@ -41,25 +42,87 @@ M3 serial protocol v1 is complete on `feat/m3-serial-protocol`, PC-only:
   - a link-lost alarm demanded independently of the Pi, with a 60 s non-extendable,
     auto-re-arming local silence;
   - button debounce (50 ms), long press (2 s) and stuck detection (30 s);
-  - a 2 s hardware watchdog, an EEPROM boot counter and reset-cause capture.
+  - a hardware watchdog (two 1 s stages since the reset-cause fix below), an EEPROM
+    boot counter and reset-cause reporting.
   No pins are assigned and no outputs are driven.
-- **Tests:** 272 Python tests (including real pyserial over pseudo-terminals against a
+- **Tests at merge:** 272 Python tests (including real pyserial over pseudo-terminals against a
   Python Uno emulator) and 23 native firmware tests, with shared frame vectors.
 
 This resolves audit findings H3, H6, M1, M7, L3 and L4.
 
+USB-only bench tooling is complete on `feat/bench-harness` ([BENCH.md](BENCH.md)):
+
+- `python -m glucose_guardian.bench` (`discover`, `run`, `watchdog`, `bootloader`,
+  `authorize-watchdog`, `flash-record`) built on the production protocol, link, transport and runtime
+  code, with JSON and Markdown reports (PASS / FAIL / NOT TESTED, physical or
+  simulated evidence, redacted serial numbers).
+- A separate `uno-watchdog-test` firmware build that announces itself and hangs on
+  purpose, alternating interrupts-enabled and interrupts-disabled hangs. Its test code
+  is compiled out of the production image.
+- `bench/Makefile` for build, deploy, setup, discovery, read-only bootloader check,
+  checksum-verified flashing, runs, restore and diagnostics collection.
+- Watchdog-test flashing needs `CONFIRM=watchdog-test` and a bootloader authorization
+  record bound to the board's current USB connection, the host boot and the deployed
+  build, at most 15 minutes old; anything missing, stale, mismatched, modified or
+  malformed stops it before avrdude runs.
+- The watchdog test opens the serial port only after it has verified the last flash
+  record itself:
+  - the watchdog-test image hash matches the build's `SHA256SUMS` and the file on disk;
+  - avrdude exited 0;
+  - the record is for the same USB connection, host boot and build, and at most
+    15 minutes old;
+  - the record is intact.
+  Each flash deletes the previous record before avrdude runs.
+
+Optiboot 4.4 reset-cause workaround, also on `feat/bench-harness`:
+
+- Optiboot 4.4 clears MCUSR before the sketch starts, so reset flags are always empty.
+- The firmware runs a two-stage watchdog (1 s interrupt, then 1 s reset). The
+  interrupt writes a checked `.noinit` RAM marker, and the next boot reports `W` from
+  it.
+- Every other reset reports `U`, including a hang with interrupts disabled.
+
+**M3 hardware bench validation is complete** for the firmware and the serial link over
+USB. The results are owner-reported and the reports stay on the Pi; the full record is
+in [BENCH.md](BENCH.md#validation-record). The bench: a Raspberry Pi 3B with Debian 13,
+and a genuine Uno R3 (`2341:0043`) with stock Optiboot 4.4, boot section `e36d971b…`.
+
+- **2026-11-07:** bootloader check PASS; automated and interactive suites PASS with
+  the earlier production image.
+- **2026-11-12, build `475deaa`:**
+  - watchdog test PASS: both hang modes reset, gaps 2.243 s, causes `U` and `W` as
+    expected;
+  - production firmware `bde6b740…` restored, verified and installed;
+  - noninteractive and interactive production runs PASS: exchanges 50 of 50 with p95
+    about 20 ms; 5 of 5 resets, longest recovery 0.732 s; bursts 500 of 500; 600
+    sustained ticks with at most 4.04 ms lateness; unplug, reconnect and backoff
+    passed in the interactive run.
+- An earlier watchdog run at `48a6c65` failed `watchdog.cause` (`U`, `U`), which led to
+  the workaround.
+
+The physical alarm system is not validated. NOT TESTED on this bench by design: the
+Uno's link-lost alarm output, the siren and bed shaker, the button, power-loss
+resilience and the display.
+
 ## Next milestone
 
-- **Bench validation (needs separate approval):** flash an Uno with nothing on its
-  outputs and work through the checklist in [HARDWARE.md](HARDWARE.md).
-- **M4 Dexcom Share adapter,** following the roadmap: behind a configuration flag,
-  tested with synthetic recorded responses, with credentials held in systemd
-  credentials outside the repository. It requires owner approval to start.
+- **Review and merge of `feat/bench-harness`:** bench tooling, flash safety checks,
+  the reset-cause workaround and the validation record.
+- **M4 Dexcom Share adapter:** an implementation plan is proposed for review on its own
+  branch, `docs/m4-dexcom-share-plan`. Implementation starts only after this branch is
+  reviewed and the plan and its owner decisions are approved.
 
 ## Known blockers and gaps
 
-- No Uno has been flashed: watchdog resets, reset-cause reporting with the installed
-  bootloader, and real serial timing are unverified.
+- Outstanding physical checks, each needing components, wiring review and approval:
+  - the Uno link-lost alarm output;
+  - buzzer and bed-shaker electrical integration;
+  - the physical button;
+  - power-loss resilience;
+  - the Waveshare 800×480 display.
+- With Optiboot 4.4, power-on, brown-out and external resets all report `U`. A
+  watchdog reset while the Pi is disconnected is lost from `cause` when the Pi
+  reconnects, because opening the port resets the Uno again.
 - A restart forgets a retained alarm level during stale data (glucose becomes unknown
   while the missing-data fault sounds). Persisting it is an open M6 item.
 - The systemd clock check has not been run on the Pi; the simulated service takes

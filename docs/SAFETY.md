@@ -36,14 +36,14 @@ with pseudo-terminals, a Python Uno emulator, and native firmware unit tests.
 | Fetch error or exception | Acquisition worker | `acquisition` fault; latest reading used until stale | Simulated; Dexcom adapter M4 |
 | Fetch blocked or slower than `fetch_timeout_s` | Acquisition worker hard timeout | `acquisition` fault; supervisor keeps ticking; one thread at most | Simulated |
 | Pi clock not synchronized (no RTC on the Pi 3B), or the check fails or times out | Clock-check worker | `clock_unsynchronized` fault; readings not evaluated | Simulated; systemd check unit-tested, not yet run on the Pi |
-| Uno silent, unplugged, or answering with corrupted, outdated, duplicate or wrong-version frames | Round-trip link age above `heartbeat_timeout_s` | `communication` fault; port reopened with backoff | PC-tested |
+| Uno silent, unplugged, or answering with corrupted, outdated, duplicate or wrong-version frames | Round-trip link age above `heartbeat_timeout_s` | `communication` fault; port reopened with backoff | PC-tested; on the USB bench (owner-reported 2026-11-12): Uno rejection of invalid frames, recovery after a heartbeat pause, unplug detection, reconnect and backoff passed |
 | Pi serial write zero-length, partial or failing (output buffer full, device stalled) | Byte count checked on every write; writability checked before writing | Frame not counted as sent; output discarded; port reopened with backoff; `communication` fault if the link stays down | PC-tested |
-| Uno resets while connected (watchdog, brown-out, power glitch, reset button) | New boot counter, or a watchdog or brown-out cause at connection | `controller_reset` fault latched until a long press | PC-tested; reset causes need bench validation |
+| Uno resets while connected (watchdog, brown-out, power glitch, reset button) | New boot counter, or a watchdog or brown-out cause at connection | `controller_reset` fault latched until a long press | DTR and watchdog resets detected on the USB bench (owner-reported 2026-11-12: 5 of 5 repeated resets, both watchdog hang modes). With Optiboot 4.4 only `W` (watchdog-interrupt marker) or `U` is reported; brown-out, power glitch and reset button not exercised |
 | Button held 30 s or more | Uno stuck detection | `button_stuck` fault; the stuck press acknowledges nothing | PC-tested; no button pin yet |
 | Display or transport send failure | Runtime adapter guard | Counted and logged; alarm evaluation continues | Simulated |
 | Alarm-engine defect | Exception out of the loop | Service exits with status 1; heartbeats stop | Simulated; systemd restart M6 |
-| Pi process crash, hang or planned stop; alarm loop stalled | No new state frame on the Uno for more than 5 s (10 s grace after boot) | Uno link-lost demand, independent of the Pi | PC-tested; no output until M7 |
-| Uno firmware hang | 2 s hardware watchdog resets the Uno | `controller_reset` on the Pi after reconnection | Watchdog reset requires bench validation |
+| Pi process crash, hang or planned stop; alarm loop stalled | No new state frame on the Uno for more than 5 s (10 s grace after boot) | Uno link-lost demand, independent of the Pi | PC-tested; not observable on the bench (no output until M7) |
+| Uno firmware hang | Two-stage hardware watchdog (1 s interrupt, then 1 s reset) resets the Uno after about 2 s | `controller_reset` on the Pi (new boot counter) | Passed on the USB bench (owner-reported 2026-11-12): hangs with interrupts enabled and disabled both reset, 2.243 s between replies |
 | Total power loss | Not possible | None | Requires backup power (hardware review) |
 
 Acknowledging a stale glucose alarm with a short press silences only the glucose

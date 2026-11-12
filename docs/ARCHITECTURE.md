@@ -248,7 +248,9 @@ heartbeat timeout, replay rejection, local silence), `Button` (debounce,
 short/long classification, stuck detection), reset-cause decoding, and the
 `Controller` that combines them into replies and an alarm `Demand`. It is C++11
 without Arduino headers or the STL and has native Unity tests (`pio test -e native`).
-`src/main.cpp` captures reset flags in `.init3`, enables the 2 s hardware watchdog,
-increments the EEPROM boot counter, moves serial bytes, and computes the demand
+`src/main.cpp` captures reset flags in `.init3`, reads and clears the
+watchdog-interrupt marker in `.noinit` RAM, enables the two-stage hardware watchdog
+(1 s interrupt that writes the marker, then 1 s reset), increments the EEPROM boot
+counter, moves serial bytes, and computes the demand
 without driving any pin. The button input is fixed at "released" until a pin is
 assigned after wiring review.

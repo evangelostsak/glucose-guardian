@@ -261,12 +261,53 @@ void test_stuck_button_reports_and_never_acknowledges() {
 }
 
 void test_reset_cause_priority() {
-  TEST_ASSERT_EQUAL_CHAR('P', resetCause(kPowerOnFlag | kBrownOutFlag));
-  TEST_ASSERT_EQUAL_CHAR('W', resetCause(kWatchdogFlag | kExternalFlag));
-  TEST_ASSERT_EQUAL_CHAR('B', resetCause(kBrownOutFlag | kExternalFlag));
-  TEST_ASSERT_EQUAL_CHAR('E', resetCause(kExternalFlag));
-  TEST_ASSERT_EQUAL_CHAR('U', resetCause(0));
+  TEST_ASSERT_EQUAL_CHAR('P', resetCause(kPowerOnFlag | kBrownOutFlag, false));
+  TEST_ASSERT_EQUAL_CHAR('W', resetCause(kWatchdogFlag | kExternalFlag, false));
+  TEST_ASSERT_EQUAL_CHAR('B', resetCause(kBrownOutFlag | kExternalFlag, false));
+  TEST_ASSERT_EQUAL_CHAR('E', resetCause(kExternalFlag, false));
+  TEST_ASSERT_EQUAL_CHAR('U', resetCause(0, false));
+  TEST_ASSERT_EQUAL_UINT16(1000, kWatchdogStageMs);
   TEST_ASSERT_EQUAL_UINT16(2000, kWatchdogTimeoutMs);
+}
+
+void test_cleared_flags_report_watchdog_only_from_the_marker() {
+  TEST_ASSERT_EQUAL_CHAR('W', resetCause(0, true));
+  TEST_ASSERT_EQUAL_CHAR('U', resetCause(0, false));
+  TEST_ASSERT_EQUAL_CHAR('P', resetCause(kPowerOnFlag, true));
+  TEST_ASSERT_EQUAL_CHAR('W', resetCause(kBrownOutFlag | kExternalFlag, true));
+}
+
+void test_watchdog_marker_is_reported_once() {
+  ResetMarker marker = {0, 0};
+  armWatchdogMarker(marker);
+  TEST_ASSERT_TRUE(takeWatchdogMarker(marker));
+  TEST_ASSERT_EQUAL_UINT32(0, marker.value);
+  TEST_ASSERT_EQUAL_UINT32(0, marker.check);
+  TEST_ASSERT_FALSE(takeWatchdogMarker(marker));
+}
+
+void test_recovered_stall_clears_the_marker() {
+  ResetMarker marker = {0, 0};
+  armWatchdogMarker(marker);
+  clearResetMarker(marker);
+  TEST_ASSERT_FALSE(takeWatchdogMarker(marker));
+}
+
+void test_power_on_ram_patterns_are_not_a_watchdog_marker() {
+  const ResetMarker patterns[] = {
+      {0, 0},
+      {0xFFFFFFFFUL, 0xFFFFFFFFUL},
+      {kWatchdogMarker, kWatchdogMarker},
+      {kWatchdogMarker, 0},
+      {kWatchdogMarker, 0xFFFFFFFFUL},
+      {static_cast<uint32_t>(~kWatchdogMarker), kWatchdogMarker},
+      {kWatchdogMarker ^ 1UL, static_cast<uint32_t>(~kWatchdogMarker)},
+  };
+  for (size_t i = 0; i < sizeof(patterns) / sizeof(patterns[0]); ++i) {
+    ResetMarker marker = patterns[i];
+    TEST_ASSERT_FALSE(takeWatchdogMarker(marker));
+    TEST_ASSERT_EQUAL_UINT32(0, marker.value);
+  }
 }
 
 void test_controller_replies_to_new_state_frames_only() {
@@ -387,6 +428,10 @@ int main() {
   RUN_TEST(test_button_short_and_long_boundaries);
   RUN_TEST(test_stuck_button_reports_and_never_acknowledges);
   RUN_TEST(test_reset_cause_priority);
+  RUN_TEST(test_cleared_flags_report_watchdog_only_from_the_marker);
+  RUN_TEST(test_watchdog_marker_is_reported_once);
+  RUN_TEST(test_recovered_stall_clears_the_marker);
+  RUN_TEST(test_power_on_ram_patterns_are_not_a_watchdog_marker);
   RUN_TEST(test_controller_replies_to_new_state_frames_only);
   RUN_TEST(test_controller_rejects_truncated_frame_joined_with_next);
   RUN_TEST(test_controller_link_loss_is_audible_without_the_pi);

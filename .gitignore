@@ -11,3 +11,6 @@ dist/
 .pio/
 *.log
 config/local.*
+bench/out/
+bench/reports/
+bench/bench-diagnostics-*.tar.gz
