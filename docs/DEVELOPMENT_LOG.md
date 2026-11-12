@@ -1,5 +1,102 @@
 # Development log
 
+## 2026-11-12 — M3 hardware bench validation recorded
+
+### Results (owner-reported from the physical bench)
+
+The bench:
+
+- Raspberry Pi 3B, Debian 13;
+- genuine Arduino Uno R3 (ATmega328P, USB `2341:0043`) with nothing on its pins;
+- stock Optiboot 4.4. The boot-section SHA-256
+  `e36d971b54b3336178813bf16cddf2658866367874587f7fc6c560fb629fbc74` equals the stock
+  Arduino image, which confirms that the 2026-11-12 analysis applies to this board.
+
+The reports stay on the Pi.
+
+- **Watchdog test** `watchdog-2026-11-12T101301Z` (build `475deaa`), PASS:
+  - `watchdog.flash_record` and `watchdog.identity` PASS;
+  - `watchdog.reset` PASS, 2 of 2, gaps 2.243 s and 2.243 s;
+  - `watchdog.cause` PASS, observed `U`, `W`, expected `U`, `W`.
+
+  Both hang modes recovered. That confirms on hardware the datasheet behavior the fix
+  relies on: a second time-out resets the MCU when the interrupt could not run.
+- **Production firmware** restored, verified and installed: SHA-256
+  `bde6b74088c52eb5483af3cfc2a3a6ef437fb9bdbeec7d7ba3d9d2d4442450db`.
+- **Noninteractive run** `run-2026-11-12T101456Z`, PASS:
+  - exchanges 50 of 50, no anomalies, p95 20.2 ms;
+  - session change, rejection, heartbeat pause and unexpected reset PASS;
+  - repeated resets 5 of 5, longest recovery 0.732 s;
+  - burst 500 of 500 at 43.9 exchanges/s;
+  - sustained 600 ticks, max lateness 4.04 ms, no communication fault after warm-up,
+    CPU 1.3%.
+- **Interactive run** `run-2026-11-12T102024Z`, PASS:
+  - exchanges 50 of 50, p95 20.21 ms;
+  - repeated resets 5 of 5, longest recovery 0.731 s;
+  - burst 500 of 500;
+  - sustained 600 ticks, max lateness 3.98 ms, no communication fault after warm-up,
+    CPU 1.3%;
+  - USB disconnect, reconnect and backoff PASS, with delays 0.801, 2.003, 4.005 and
+    8.008 s against 1, 2, 4 and 8 s.
+
+NOT TESTED by design: `link.uno_alarm` and `hardware.*`; in the noninteractive run also
+the USB replug checks. The owner's summary did not itemize the remaining checks; the
+PASS verdicts mean none failed.
+
+### Changes and decisions
+
+- Documentation only: `BENCH.md` (validation record), `HARDWARE.md` (validation status
+  and outstanding physical checks), `PROTOCOL.md` (reset-cause confirmation),
+  `SAFETY.md` (bench status of the link, reset and hang rows) and `PROJECT_STATUS.md`
+  (M3 bench validation complete, M3 merged as PR #5, next steps).
+- M3 hardware bench validation is recorded as complete for the firmware and serial
+  link over USB. The physical alarm system is not validated. Outstanding:
+  - the Uno link-lost alarm output;
+  - buzzer and bed-shaker integration;
+  - the physical button;
+  - power-loss resilience;
+  - the Waveshare 800×480 display.
+
+### Review
+
+- Watchdog behavior and the reset-cause documentation agree across `PROTOCOL.md`,
+  `HARDWARE.md`, `SAFETY.md`, `ARCHITECTURE.md` and `BENCH.md`: two 1 s stages, `W`
+  only from the marker, `U` otherwise with Optiboot 4.4.
+- Watchdog-test separation:
+  - a rebuild of `475deaa` gives production `bde6b740…`, identical to the installed
+    image;
+  - the production ELF contains no `GGTEST` banner, and its only endless loop is
+    avr-libc's `__stop_program`;
+  - the test image contains the banner and the deliberate hang;
+  - the harness fails `firmware.identity` on the banner and fails `firmware.upload`
+    for a watchdog-test flash record;
+  - `make restore` flashes only the production variant.
+- Flash safety checks are unchanged since `48a6c65`: `CONFIRM`, the device-bound
+  bootloader authorization, the verified flash record, `SHA256SUMS`, and by-id device
+  paths.
+- The branch adds no binaries, reports, archives or secrets. `bench/out/`,
+  `bench/reports/` and diagnostics archives are ignored. The serial numbers in tests
+  are synthetic.
+- CI ran ruff, mypy and pytest on 3.11 and 3.13, both firmware builds and the native
+  tests; it passed on `475deaa`.
+
+### Validation
+
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean (24 files), pytest 383
+  passed.
+- Firmware: `pio run -e uno` and `-e uno-watchdog-test` succeed (production 390 bytes
+  RAM, 3764 bytes flash); `pio test -e native` 27 of 27.
+
+### Unresolved issues
+
+- The 2026-11-07 totals were reported as 14 PASS, 0 FAIL and 5 NOT TESTED, which is 19
+  checks; a suite run reports 20. They remain unreconciled; the 2026-11-12 runs
+  supersede them.
+- With Optiboot 4.4, `P`, `B` and `E` are unavailable. A watchdog reset during a Pi
+  disconnection is not reported after reconnection.
+- Not exercised on the bench: a write stalled mid-transfer, stack headroom, brown-out
+  and reset-button resets.
+
 ## 2026-11-12 — Watchdog reset cause with Optiboot 4.4
 
 ### Findings
