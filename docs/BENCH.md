@@ -33,8 +33,12 @@ and contain no host names, user names or glucose values.
 
 The watchdog-test image is the production firmware plus code behind
 `GUARDIAN_WATCHDOG_TEST`. It prints `GGTEST WATCHDOG-HANG FIRMWARE NOT FOR USE` at
-boot and every 5 s, and hangs 20 s after boot so the 2 s hardware watchdog resets it.
-The production image is byte-identical with and without this code. A production `run`
+boot and every 5 s, and hangs 20 s after boot so the two-stage hardware watchdog
+resets it. On an even boot counter it hangs with interrupts enabled, so the watchdog
+interrupt records a `W` marker. On an odd one it hangs with interrupts disabled, so the
+interrupt cannot run and only the second stage resets it. The two hang cycles of
+`make watchdog` cover both. The production image is the same with and without this
+code, because it is excluded at compile time. A production `run`
 that sees the banner fails `firmware.identity` and stops.
 
 ## Workflow
@@ -204,8 +208,8 @@ bench criteria, not clinical or electrical limits.
 | `usb.reconnect` | Interactive: after replugging, a new initial connection without an unexpected-reset flag |
 | `watchdog.flash_record` | Watchdog test only, before the port is opened: the last flash record verifies (see [Flash records](#flash-records-and-the-watchdog-test)) |
 | `watchdog.identity` | Watchdog test only: banner seen and GG1 reports received |
-| `watchdog.reset` | Two hang cycles: boot counter +1, reply gap 1.5–4.0 s, unexpected reset flagged |
-| `watchdog.cause` | Reports after the watchdog reset carry cause `W` |
+| `watchdog.reset` | Two hang cycles, one with interrupts enabled and one disabled: boot counter +1, reply gap 1.5–4.0 s, unexpected reset flagged |
+| `watchdog.cause` | `W` after the interrupts-enabled hang (even boot), `U` after the interrupts-disabled hang (odd boot) |
 | `hardware.*` | Always NOT TESTED: outputs, button, power and backup, display |
 
 ## Reading the results
@@ -214,10 +218,16 @@ bench criteria, not clinical or electrical limits.
   not run in this setup; the reason is in the report.
 - `evidence: physical-usb` marks results measured on the real Uno; `simulated` marks
   emulator runs; `flash-record` marks the upload record.
-- **Reset cause `U`:** the stock Uno bootloader (Optiboot) clears the reset flags
-  before the sketch runs. A `watchdog.cause` FAIL with `U` while `watchdog.reset`
-  passes means resets are still detected by the boot counter, but the cause is
-  unavailable on this board.
+- **Reset cause:** Optiboot 4.4 clears the reset flags before the sketch runs, so
+  `W` comes only from the firmware's watchdog-interrupt marker (see
+  [PROTOCOL.md](PROTOCOL.md)). Possible failures:
+  - `U` after the interrupts-enabled hang: the marker was not written or did not
+    survive the reset.
+  - `W` after the interrupts-disabled hang: something other than the watchdog
+    interrupt wrote the marker.
+  - A `watchdog.reset` failure on the interrupts-disabled cycle: the second watchdog
+    stage did not reset the Uno. That is a recovery failure; restore production
+    firmware and report it.
 - **Rejects at startup:** opening the port resets the Uno into its bootloader for
   about a second. Frames sent then can make the bootloader answer with STK500 bytes,
   which the Pi counts as rejected lines. Retries absorb this; a non-zero
