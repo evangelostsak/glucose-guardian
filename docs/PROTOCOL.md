@@ -58,7 +58,7 @@ GG1 R 00A1 0002 7F3A 0001 E 00 03 01*505C
 | `boot` | Boot counter, incremented in EEPROM at every Uno start |
 | `seq` | Per-boot report sequence, wraps |
 | `ack_session`, `ack_seq` | The state frame being answered |
-| `cause` | Reset cause: `P` power-on, `W` watchdog, `B` brown-out, `E` external (including DTR), `U` unknown |
+| `cause` | Reset cause: `P` power-on, `W` watchdog, `B` brown-out, `E` external (including DTR), `U` unknown. With the stock Optiboot 4.4 only `W` and `U` occur (see below) |
 | `flags` | Bit 0: button stuck. Other bits must be zero |
 | `short`, `long` | Cumulative short and long presses this boot, modulo 256 |
 
@@ -111,10 +111,21 @@ after it is accepted.
 | No accepted report for longer than `heartbeat_timeout_s` | `communication` fault |
 
 Opening the port asserts DTR, which resets the Uno; that reset arrives as an initial
-connection and raises no fault. The stock Uno bootloader (Optiboot) clears the reset
-flags before the sketch runs, so `cause` may read `U`; the boot counter detects resets
-regardless of cause. Bench validation must confirm what the installed bootloader
-reports.
+connection and raises no fault. The boot counter detects every reset regardless of
+cause.
+
+The stock Uno bootloader, Optiboot 4.4, copies MCUSR and writes zero to it before
+starting the sketch, and passes nothing on. The sketch therefore always reads empty
+reset flags, so `P`, `B` and `E` never occur with this bootloader. The firmware reports
+`W` from its own evidence instead:
+
+- the watchdog runs in interrupt-and-reset mode, with two stages of 1 s;
+- the first-stage interrupt writes a checked marker to RAM that survives the reset
+  (`.noinit`);
+- the next boot reads and clears the marker and reports `W`.
+
+A hang with interrupts disabled cannot run the interrupt, so it still resets after
+2 s but reports `U`. Hardware validation is pending (BENCH.md, watchdog test).
 
 ## Button events
 
@@ -139,11 +150,12 @@ All values are provisional until bench validation.
 | Heartbeat timeout | 5 s | Link-lost when no new state frame for more than 5 s; latched until the next accepted frame, so a `millis()` wrap cannot clear it |
 | Local silence | 60 s | A long press while link-lost silences it once; further presses do not extend it; it re-arms automatically while link-lost persists and is cancelled when the link returns |
 | Debounce, long press, stuck | 50 ms, 2 s, 30 s | Button classification |
-| Hardware watchdog | 2 s | Fed once per `loop()`; a hung loop resets the Uno |
+| Hardware watchdog | 2 × 1 s | Fed once per `loop()`; the first 1 s stage records a watchdog marker, the second resets the Uno, so a hung loop resets after about 2 s as before; a stall that recovers between the stages clears the marker |
 
 The watchdog-test build (`uno-watchdog-test`, never for deployment) additionally
 prints `GGTEST WATCHDOG-HANG FIRMWARE NOT FOR USE` lines, which the Pi rejects as
-malformed, and hangs 20 s after boot. See [BENCH.md](BENCH.md).
+malformed, and hangs 20 s after boot: with interrupts enabled on an even boot counter
+and with interrupts disabled on an odd one. See [BENCH.md](BENCH.md).
 
 While link-lost, the Uno demands its link-lost alarm (`fault = true`, `glucose = -`)
 independently of the Pi. Hardware outputs are not implemented; the demand is computed
