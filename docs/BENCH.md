@@ -245,3 +245,63 @@ bench criteria, not clinical or electrical limits.
 `bench/reports/flash-<UTC time>.json`, `.log` and `last-flash.json`. `make collect`
 adds kernel USB messages (serial numbers removed), `lsusb`, OS details and the build
 checksums, and packs everything into `bench/bench-diagnostics-<UTC time>.tar.gz`.
+
+## Validation record
+
+These results are owner-reported from the physical bench; the reports stay on the Pi
+under `bench/reports/` and are not in the repository. They cover the M3 firmware and
+serial link over USB only, not the alarm system (see
+[HARDWARE.md](HARDWARE.md#usb-only-bench-validation-status)).
+
+The bench:
+
+- a Raspberry Pi 3B with Debian 13, and a genuine Arduino Uno R3 (ATmega328P, USB
+  `2341:0043`) with nothing connected to any pin;
+- stock Optiboot 4.4, boot section SHA-256
+  `e36d971b54b3336178813bf16cddf2658866367874587f7fc6c560fb629fbc74`.
+
+| Date | Run | Firmware | Verdict |
+|---|---|---|---|
+| 2026-11-07 | Bootloader check | — | PASS (Optiboot 4.4) |
+| 2026-11-07 | Automated and interactive suites | earlier production image `4b36ab28…` | PASS (reported as 14 PASS, 0 FAIL, 5 NOT TESTED) |
+| 2026-11-12 | Watchdog test, bench build `48a6c65` | single-stage watchdog | FAIL: `watchdog.cause` `U`, `U`; led to the reset-cause fix |
+| 2026-11-12 | `watchdog-2026-11-12T101301Z`, build `475deaa` | watchdog-test image | PASS |
+| 2026-11-12 | `run-2026-11-12T101456Z`, build `475deaa` | production `bde6b740…` | PASS |
+| 2026-11-12 | `run-2026-11-12T102024Z` (interactive), build `475deaa` | production `bde6b740…` | PASS |
+
+Watchdog test `watchdog-2026-11-12T101301Z`:
+
+- `watchdog.flash_record` and `watchdog.identity`: PASS;
+- `watchdog.reset`: PASS, 2 of 2 resets, gaps 2.243 s and 2.243 s, both the
+  interrupts-disabled and the interrupts-enabled hang;
+- `watchdog.cause`: PASS, observed `U`, `W`, expected `U`, `W`.
+
+Production firmware runs:
+
+| Check | `run-…101456Z` | `run-…102024Z` (interactive) |
+|---|---|---|
+| `gg1.exchange` | PASS: 50 of 50, no anomalies, p95 20.2 ms | PASS: 50 of 50, no anomalies, p95 20.21 ms |
+| `gg1.session_change` | PASS | not itemized |
+| `gg1.rejection` | PASS | not itemized |
+| `link.heartbeat_pause` | PASS | not itemized |
+| `reset.unexpected` | PASS | not itemized |
+| `reset.repeated` | PASS: 5 of 5, longest recovery 0.732 s | PASS: 5 of 5, longest recovery 0.731 s |
+| `traffic.burst` | PASS: 500 of 500, 43.9 exchanges/s | PASS: 500 of 500 |
+| `traffic.sustained` | PASS: 600 ticks, max lateness 4.04 ms, no communication fault after warm-up, CPU 1.3% | PASS: 600 ticks, max lateness 3.98 ms, no communication fault after warm-up, CPU 1.3% |
+| `usb.disconnect`, `usb.reconnect` | NOT TESTED (noninteractive) | PASS |
+| `usb.backoff` | NOT TESTED (noninteractive) | PASS: delays 0.801, 2.003, 4.005, 8.008 s against 1, 2, 4, 8 s (tolerance 0.7 s) |
+| `link.uno_alarm`, `hardware.*` | NOT TESTED (by design) | NOT TESTED (by design) |
+
+"Not itemized" means the owner's summary did not list the check. A PASS verdict means
+no check failed. Checks missing from the table were not itemized in either run:
+`usb.enumeration`, `firmware.upload`, `firmware.identity` and `gg1.handshake`.
+
+Firmware images:
+
+- **Production** `bde6b74088c52eb5483af3cfc2a3a6ef437fb9bdbeec7d7ba3d9d2d4442450db`.
+  It was restored, verified and is installed on the bench Uno. A local rebuild of
+  `475deaa` gives the same hash.
+- **Watchdog-test image:** a local rebuild of `475deaa` gives
+  `9e194d48d60f233d480c11c7908d0bec15ba53932fd8ccb4335a511920f54317`. On the bench,
+  `watchdog.flash_record` passed, so the flashed image matched the deployed build's
+  `SHA256SUMS`.
