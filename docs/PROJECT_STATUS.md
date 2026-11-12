@@ -1,6 +1,6 @@
 # Project status
 
-Updated: 2026-11-07
+Updated: 2026-11-12
 
 ## Current implementation
 
@@ -79,18 +79,39 @@ genuine Uno R3). The reports stay on the Pi and are not in the repository:
 - the automated and interactive USB suites passed, including disconnect, reconnect and
   backoff: 14 PASS, 0 FAIL, 5 NOT TESTED (hardware-dependent).
 
+Watchdog test, owner-reported on 2026-11-12 (bench build `48a6c65`):
+`watchdog.flash_record`, `watchdog.identity` and `watchdog.reset` passed (2 of 2
+resets, gaps 2.243 s); `watchdog.cause` failed with `U`, `U`. Production firmware was
+restored and verified.
+
+Cause: Optiboot 4.4 clears MCUSR before the sketch starts. The firmware's capture was
+correct but read zero. The proposed fix, on `feat/bench-harness` and not yet on
+hardware:
+
+- a two-stage watchdog (1 s interrupt, then 1 s reset, about 2 s to reset as before);
+- the first-stage interrupt writes a checked marker in `.noinit` RAM, and the next
+  boot reports `W` from it;
+- the watchdog-test build alternates interrupts-enabled and interrupts-disabled hangs,
+  so one run verifies `W` and recovery without the interrupt. The latter reports `U`.
+
+The production image changes (sha256 `bde6b740…`).
+
 ## Next milestone
 
-- **Review of the verified watchdog gate,** then the watchdog test on the Uno
-  (flashing and running it each need approval).
+- **Review of the reset-cause fix,** then a rebuild, a deploy and a new watchdog test
+  on the Uno, and production firmware restored with the new image. Flashing and
+  running each need approval.
 - **M4 Dexcom Share adapter:** an implementation plan is proposed for review on its own
   branch, `docs/m4-dexcom-share-plan`. Implementation starts only after the watchdog
   changes are reviewed and the plan is approved.
 
 ## Known blockers and gaps
 
-- The watchdog test has not run on hardware: watchdog resets and reset-cause
-  reporting with Optiboot 4.4 are unverified.
+- The two-stage watchdog and the `W` marker are unverified on hardware; the reset
+  itself was verified with the earlier single-stage watchdog.
+- With Optiboot 4.4, power-on, brown-out and external resets all report `U`. A
+  watchdog reset while the Pi is disconnected is lost from `cause` when the Pi
+  reconnects, because opening the port resets the Uno again.
 - A restart forgets a retained alarm level during stale data (glucose becomes unknown
   while the missing-data fault sounds). Persisting it is an open M6 item.
 - The systemd clock check has not been run on the Pi; the simulated service takes
