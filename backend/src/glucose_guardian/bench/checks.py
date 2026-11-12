@@ -155,10 +155,13 @@ WATCHDOG_FLASH = ("watchdog.flash_record", "Watchdog-test flash evidence",
 WATCHDOG_IDENTITY = ("watchdog.identity", "Watchdog-test firmware identity",
                      "watchdog-test banner seen and GG1 reports received")
 WATCHDOG_RESET = ("watchdog.reset", "Hardware watchdog reset",
-                  "each deliberate hang ends in a reset: boot counter +1, reply gap within "
-                  "the window, Pi link flags an unexpected reset")
+                  "each deliberate hang, with interrupts enabled (even boot) and disabled (odd "
+                  "boot), ends in a reset: boot counter +1, reply gap within the window, Pi "
+                  "link flags an unexpected reset")
 WATCHDOG_CAUSE = ("watchdog.cause", "Watchdog reset cause",
-                  "reports after a watchdog reset carry reset cause W")
+                  "the reset after an interrupts-enabled hang reports W (watchdog interrupt "
+                  "marker); after an interrupts-disabled hang, which cannot run the interrupt, "
+                  "it reports U")
 LIMITATIONS = (
     (("hardware.outputs", "Siren and bed shaker outputs", "outputs driven per alarm demand"),
      "no output pins or drivers exist; requires electrical integration (M7)"),
@@ -592,7 +595,11 @@ def run_watchdog(bench: Bench) -> list[Check]:
                     bench.sleep(profile.exchange_interval_s)
             if new is None:
                 break
+            interrupts_disabled = last.report.boot & 1 == 1
             cycles.append({"old_boot": f"{last.report.boot:04X}",
+                           "hang": "interrupts disabled" if interrupts_disabled
+                           else "interrupts enabled",
+                           "expected_cause": "U" if interrupts_disabled else "W",
                            "new_boot": f"{new.report.boot:04X}",
                            "increment_ok": new.report.boot == (last.report.boot + 1) % 0x10000,
                            "gap_s": round(new.received_at - last.received_at, 3),
@@ -609,10 +616,12 @@ def run_watchdog(bench: Bench) -> list[Check]:
     reset = timer.check(WATCHDOG_RESET, reset_ok,
                         f"{len(cycles)}/{profile.watchdog_cycles} watchdog resets observed, gaps "
                         f"{[cycle['gap_s'] for cycle in cycles]} s", {"cycles": cycles})
-    cause_ok = bool(causes) and all(cause == "W" for cause in causes)
-    cause = timer.check(WATCHDOG_CAUSE, cause_ok, f"reported causes {causes}",
-                        {"note": "U means the bootloader cleared MCUSR before the sketch "
-                                 "read it (see docs/HARDWARE.md)"})
+    expected = [cycle["expected_cause"] for cycle in cycles]
+    cause_ok = bool(causes) and causes == expected
+    cause = timer.check(WATCHDOG_CAUSE, cause_ok,
+                        f"reported causes {causes}, expected {expected}",
+                        {"note": "Optiboot 4.4 clears MCUSR, so W comes only from the "
+                                 "firmware's watchdog-interrupt marker (see docs/HARDWARE.md)"})
     return [identity, reset, cause]
 
 
