@@ -125,7 +125,9 @@ reset flags, so `P`, `B` and `E` never occur with this bootloader. The firmware 
 - the next boot reads and clears the marker and reports `W`.
 
 A hang with interrupts disabled cannot run the interrupt, so it still resets after
-2 s but reports `U`. Hardware validation is pending (BENCH.md, watchdog test).
+2 s but reports `U`. Both cases were confirmed on the bench Uno on 2026-11-12. That is
+owner-reported: report `watchdog-2026-11-12T101301Z`, causes `U` and `W` as expected,
+2.243 s between the last reply before each hang and the first after it.
 
 ## Button events
 
