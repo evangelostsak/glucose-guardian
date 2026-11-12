@@ -170,7 +170,11 @@ def test_missing_device_fails_enumeration_only(tmp_path):
     assert by_id["gg1.handshake"] is Status.NOT_TESTED
 
 
-def watchdog_firmware(emu: Emulator, cause: ResetCause) -> None:
+def marker_firmware(old_boot: int) -> ResetCause:
+    return ResetCause.UNKNOWN if old_boot & 1 else ResetCause.WATCHDOG
+
+
+def watchdog_firmware(emu: Emulator, cause: Callable[[int], ResetCause]) -> None:
     banner = banner_hook(emu)
     state = {"boot_at": time.monotonic(), "hung_at": None}
 
@@ -182,7 +186,7 @@ def watchdog_firmware(emu: Emulator, cause: ResetCause) -> None:
             emu.uno.silent = True
         elif state["hung_at"] is not None and now - state["hung_at"] > 0.2:
             emu.uno.silent = False
-            emu.uno.reboot((emu.uno.boot + 1) % 0x10000, cause)
+            emu.uno.reboot((emu.uno.boot + 1) % 0x10000, cause(emu.uno.boot))
             state.update(boot_at=now, hung_at=None)
 
     with emu.lock:
@@ -191,7 +195,7 @@ def watchdog_firmware(emu: Emulator, cause: ResetCause) -> None:
 
 def test_watchdog_command_passes_with_emulated_watchdog_firmware(emulator):
     emu, path = emulator
-    watchdog_firmware(emu, ResetCause.WATCHDOG)
+    watchdog_firmware(emu, marker_firmware)
     by_id = statuses(run_watchdog(make_bench(path, emu, FAST)))
     assert by_id == {"watchdog.identity": Status.PASS, "watchdog.reset": Status.PASS,
                      "watchdog.cause": Status.PASS}
@@ -199,10 +203,29 @@ def test_watchdog_command_passes_with_emulated_watchdog_firmware(emulator):
 
 def test_watchdog_unknown_cause_fails_only_the_cause_check(emulator):
     emu, path = emulator
-    watchdog_firmware(emu, ResetCause.UNKNOWN)
+    watchdog_firmware(emu, lambda old_boot: ResetCause.UNKNOWN)
     by_id = statuses(run_watchdog(make_bench(path, emu, FAST)))
     assert by_id["watchdog.reset"] is Status.PASS
     assert by_id["watchdog.cause"] is Status.FAIL
+
+
+def test_watchdog_cause_reported_without_interrupt_evidence_fails(emulator):
+    emu, path = emulator
+    watchdog_firmware(emu, lambda old_boot: ResetCause.WATCHDOG)
+    results = {check.id: check for check in run_watchdog(make_bench(path, emu, FAST))}
+    assert results["watchdog.reset"].status is Status.PASS
+    assert results["watchdog.cause"].status is Status.FAIL
+
+
+def test_watchdog_cycles_cover_both_hang_modes(emulator):
+    emu, path = emulator
+    watchdog_firmware(emu, marker_firmware)
+    results = {check.id: check for check in run_watchdog(make_bench(path, emu, FAST))}
+    cycles = results["watchdog.reset"].details["cycles"]
+    assert sorted(cycle["hang"] for cycle in cycles) == ["interrupts disabled",
+                                                         "interrupts enabled"]
+    assert all(cycle["cause"] == cycle["expected_cause"] for cycle in cycles)
+    assert results["watchdog.cause"].status is Status.PASS
 
 
 def test_watchdog_command_refuses_production_firmware(emulator):
@@ -235,7 +258,7 @@ def test_watchdog_gate_refuses_before_opening_the_port(tmp_path):
 
 def test_watchdog_gate_runs_the_test_after_verification(emulator):
     emu, path = emulator
-    watchdog_firmware(emu, ResetCause.WATCHDOG)
+    watchdog_firmware(emu, marker_firmware)
     record = {"sha256": "ab" * 32, "utc": "20261107T100500Z"}
     results = run_watchdog_verified(make_bench(path, emu, FAST), lambda: record)
     assert all(check.status is Status.PASS for check in results) and len(results) == 4
@@ -345,6 +368,7 @@ def test_firmware_banner_matches_the_harness_constant():
     source = (ROOT / "firmware" / "arduino-uno" / "src" / "main.cpp").read_text()
     assert WATCHDOG_TEST_BANNER.decode() + "\\n" in source
     assert source.count("#ifdef GUARDIAN_WATCHDOG_TEST") == 3
+    assert "if ((testBootId & 1U) != 0U) {\n      cli();\n    }\n    for (;;) {" in source
 
 
 def test_makefile_keeps_the_watchdog_test_interlocks():
