@@ -1,5 +1,106 @@
 # Development log
 
+## 2026-11-12 — Watchdog reset cause with Optiboot 4.4
+
+### Findings
+
+Owner-reported watchdog test (bench build `48a6c65`, genuine Uno R3, Optiboot 4.4):
+`watchdog.reset` passed, 2 of 2 resets with 2.243 s gaps; `watchdog.cause` failed,
+`U`, `U` instead of `W`.
+
+Confirmed:
+
+- Optiboot 4.4 destroys the reset flags before the sketch runs. In the Arduino core's
+  `optiboot.c` (version 4.4) and the compiled listing `optiboot_atmega328.lst`, the
+  entry runs `in r24, MCUSR`, `out MCUSR, r1` (zero), then `rcall appStart` for any
+  non-external reset. `appStart` loads `r24` with 0 for `watchdogConfig(WATCHDOG_OFF)`
+  and jumps to address 0, so no copy of the flags reaches the sketch.
+- The application capture is not at fault. In the firmware ELF, `resetFlags` is in
+  `.noinit` (`0x027D`), the `.init3` code stores MCUSR there before the C runtime runs,
+  and `__do_clear_bss` stops at `0x027D`. It stores the zero Optiboot left.
+- `resetCause(0)` returns `U` by design, and GG1 carries the character unchanged; the
+  Pi parsed `U` correctly.
+- The boot counter and the Pi's reset detection work independently of the cause:
+  `watchdog.reset` passed with boot +1 and the unexpected reset flagged.
+- After an external reset (DTR, reset button), Optiboot 4.4 leaves through its own
+  watchdog reset (1 s timeout, or 16 ms after programming). Reset flags, even if a
+  bootloader preserved them, would show a watchdog reset after every DTR reset.
+
+Classification: a bootloader limitation that the firmware did not compensate for, not
+an application capture defect. The test expectation of `W` was right in intent, since
+the firmware should report a watchdog reset, but not achievable from MCUSR on this
+bootloader.
+
+Not confirmed:
+
+- That the bench board runs exactly this Optiboot binary. The version marker 4.4 was
+  read; the boot-section hash is still to be compared. The stock image gives
+  `region_sha256` `e36d971b54b3336178813bf16cddf2658866367874587f7fc6c560fb629fbc74`.
+- That a second time-out with the interrupt not executed resets the MCU. This is the
+  ATmega328P datasheet's description of interrupt-and-reset mode; the new test run
+  checks it.
+
+### Changes and decisions
+
+- `lib/guardian/reset_cause`: `ResetMarker` (value `0x57444F47` with its complement),
+  `armWatchdogMarker`, `clearResetMarker`, `takeWatchdogMarker` (validates, then
+  clears), and `resetCause(mcusr, watchdogMarker)`. The MCUSR priority is unchanged
+  (`P`, `W`, `B`, `E`, `U`), and the marker counts as `W` after `P`.
+- `src/main.cpp`:
+  - `WDTO_1S` with `WDIE`: interrupt-and-reset mode;
+  - `ISR(WDT_vect)` writes the marker to `.noinit`;
+  - `setup()` takes the marker before starting the watchdog;
+  - `loop()` feeds the watchdog and, if the interrupt fired (`WDIE` cleared by
+    hardware), clears the marker and re-arms `WDIE`.
+  The time to reset stays about 2 s (two 1 s stages instead of one 2 s stage).
+- Rejected alternatives:
+  - reading a register left over by the bootloader: there is none, and it would report
+    `W` after every DTR reset;
+  - a 2 s interrupt stage plus a forced reset: an interrupts-disabled hang would take
+    4 s;
+  - replacing the bootloader: not allowed.
+- The watchdog-test build hangs with interrupts disabled on odd boot counters and
+  enabled on even ones. The harness expects `W` and `U` respectively, and records the
+  hang mode and expected cause per cycle.
+- Unchanged: GG1, the Pi link, the flash safety checks, the boot counter, and the
+  bench gap window (1.5–4.0 s).
+
+### Hardware and protocol record
+
+- Firmware behavior change: watchdog mode and reset-cause source. Production hex
+  sha256 `bde6b74088c52eb5483af3cfc2a3a6ef437fb9bdbeec7d7ba3d9d2d4442450db`
+  (previously `4b36ab28…`); watchdog-test hex `9e194d48…`. RAM 390 bytes (+8 for the
+  marker), flash 3764 bytes.
+- No GPIO, output, alarm-policy or GG1 format change. `PROTOCOL.md`, `HARDWARE.md`,
+  `SAFETY.md`, `ARCHITECTURE.md` and `BENCH.md` updated.
+
+### Validation
+
+- Native firmware tests 27 of 27 (4 new): `W` from the marker with cleared flags,
+  power-on precedence, the marker reported once, a recovered stall clears it, and
+  power-on RAM patterns rejected.
+- Python 3.11.18 and 3.13.18: ruff clean, mypy strict clean, pytest 383 passed (2
+  new). The emulator reproduces the hardware result (`U`, `U`, FAIL), a firmware
+  reporting `W` without interrupt evidence (FAIL), and both hang modes per run.
+- Mutation check: all 9 mutations of the marker logic, the cause mapping, the harness
+  expectations and the test-build hang mode fail the suite.
+- Disassembly of the production ELF:
+  - the ISR writes `47 4F 44 57` and its complement to `0x027E`, outside Optiboot's
+    page buffer (`0x0100`–`0x017F`);
+  - `setup()` writes `WDTCSR` `0x18`, `0x0E`, then sets `WDIE`;
+  - `loop()` clears the marker and re-arms.
+- `pio run -e uno` and `-e uno-watchdog-test` succeed. Not run on hardware.
+
+### Unresolved issues
+
+- Hardware verification of `W`, and of recovery from an interrupts-disabled hang.
+- With Optiboot 4.4, `P`, `B` and `E` are unavailable. A watchdog reset during a Pi
+  disconnection is not reported after reconnection, because the DTR reset at port
+  open starts a new boot. Keeping `W` until the Pi acknowledges it would be a protocol
+  change for separate approval.
+- If an external reset arrives within 1 s after a first-stage interrupt, its boot
+  reports `W`. The device had stalled for at least 1 s in that case.
+
 ## 2026-11-07 — Verified flash evidence before the watchdog test
 
 ### Changes and decisions
