@@ -12,8 +12,10 @@ from share_harness import DEXCOM_EXAMPLE
 from glucose_guardian import service
 from glucose_guardian.config import load_config
 from glucose_guardian.credentials import PASSWORD_FILE, USERNAME_FILE
+from glucose_guardian.display import FanOutDisplay, LogDisplay, Source
 from glucose_guardian.serial_transport import SerialTransport
 from glucose_guardian.share_simulator import SYNTHETIC_PASSWORD, SYNTHETIC_USERNAME
+from glucose_guardian.snapshot import read_snapshot
 from glucose_guardian.transport import SimulatedTransport
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -61,7 +63,8 @@ def test_build_transport_follows_the_config(tmp_path):
 
 def dexcom_config(tmp_path, server: str, state_dir: Path) -> Path:
     text = DEXCOM_EXAMPLE.read_text().replace('server = "ous"', server).replace(
-        "/var/lib/glucose-guardian", str(state_dir)).replace("tick_s = 1", "tick_s = 0.05")
+        "/var/lib/glucose-guardian", str(state_dir)).replace("tick_s = 1", "tick_s = 0.05").replace(
+        "/run/glucose-guardian", str(tmp_path))
     path = tmp_path / "local-dexcom.toml"
     path.write_text(text)
     return path
@@ -124,3 +127,41 @@ def test_service_reads_from_the_share_simulator_end_to_end(tmp_path, simulator):
         assert secret not in line + rest
     assert json.loads((tmp_path / "dexcom-share-state.json").read_text())[
         "blocked_reason"] is None
+
+
+def test_build_display_follows_the_display_table(tmp_path):
+    snapshot = load_config(write(tmp_path))
+    assert isinstance(service.build_display(snapshot), FanOutDisplay)
+    text = write(tmp_path).read_text()
+    log_only = tmp_path / "log.toml"
+    log_only.write_text(text[:text.index("[display]")] + '[display]\nkind = "log"\n'
+                        + text[text.index("[hardware]"):])
+    assert isinstance(service.build_display(load_config(log_only)), LogDisplay)
+
+
+def test_missing_snapshot_directory_refuses_to_start(tmp_path, caplog):
+    config = write(tmp_path, (str(tmp_path / "display.json"),
+                              str(tmp_path / "absent" / "display.json")))
+    assert service.main(["--config", str(config)]) == service.EXIT_CONFIG
+    assert "snapshot_file directory" in caplog.text
+
+
+def test_simulated_service_writes_a_simulated_snapshot(tmp_path):
+    config = write(tmp_path, ("tick_s = 1", "tick_s = 0.05"))
+    process = subprocess.Popen(
+        [sys.executable, "-m", "glucose_guardian.service", "--config", str(config)],
+        stderr=subprocess.PIPE, text=True, env={**os.environ, "PYTHONPATH": str(SRC)})
+    try:
+        assert "display=snapshot" in process.stderr.readline()
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "display.json").exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        written = read_snapshot(tmp_path / "display.json")
+        process.send_signal(signal.SIGTERM)
+        _, rest = process.communicate(timeout=10)
+    finally:
+        process.kill()
+    assert (written.source, written.source_status, written.outputs_enabled) == (
+        Source.SIMULATED, None, False)
+    assert "110" not in rest
