@@ -81,7 +81,7 @@ Findings:
 - **F4. `Frame` lacks** the reading's timestamp, its trend, the data source (simulated
   or Dexcom) and whether outputs are enabled.
 - **F5. The display depends on a supervised runtime.** Without systemd supervision, a
-  runtime crash leaves the screen on "not running" until someone restarts the
+  runtime crash leaves the screen on "NO DATA" until someone restarts the
   runtime. Audit finding M6 (restart policy and watchdog) is therefore a prerequisite
   (D1).
 - **F6. Platform limits (audit finding M9).** 1 GB of RAM rules out a browser kiosk.
@@ -115,8 +115,8 @@ Two processes:
   evaluation or the heartbeat to the Uno.
 - **Least privilege:** the display runs as its own user, without network and
   credentials, and can only read the snapshot (section 3.6).
-- **Honest failure:** a separate display can show that the runtime has stopped. An
-  in-process renderer would stop with it.
+- **Honest failure:** a separate display can show that its data stopped arriving,
+  without claiming to know why. An in-process renderer would stop with it.
 
 A single snapshot file in `/run`:
 
@@ -124,7 +124,7 @@ A single snapshot file in `/run`:
   sees a partial snapshot;
 - lives on tmpfs, so live values never reach the SD card and disappear at reboot;
 - is removed by systemd (`RuntimeDirectory=`) when the runtime stops, which the
-  display shows as "not running";
+  display shows as "NO DATA";
 - is read from scratch on every refresh, so a restarted display shows the current
   state at once.
 
@@ -234,7 +234,7 @@ Every refresh classifies the snapshot. The first matching row wins:
 
 | # | Condition | Glucose area | Trend arrow |
 |---|---|---|---|
-| 1 | Snapshot missing, unreadable or rejected; older than `snapshot_max_age_s` by monotonic time; or written in the future | Full screen "NO DATA", with "Glucose Guardian is not running" or "display data invalid"; no value | none |
+| 1 | Snapshot missing, unreadable or rejected; older than `snapshot_max_age_s` by monotonic time; or written in the future | Full screen "NO DATA", with "No recent display data" (missing or expired; the display cannot tell whether the runtime stopped, stalled or lost its snapshot directory) or "display data invalid"; no value | none |
 | 2 | `glucose_current`, and the age recomputed by the display is at most `max_age_s` | Value in the level color, "mg/dL", age and reading time | shown |
 | 3 | Not current, and the last valid reading's recomputed age is at most `last_known_cutoff_s` | Value in grey, smaller, marked "LAST KNOWN", with its age shown prominently | none |
 | 4 | Not current, and no valid reading since start, or the last one is older than `last_known_cutoff_s` | "NO CURRENT DATA" with the reason; no number. "Last reading N min ago" when a reading exists | none |
@@ -346,7 +346,7 @@ Runtime unit `glucose-guardian.service` (D1):
 |---|---|
 | `User=glucose-guardian`, `Group=glucose-guardian`, `UMask=0027` | Own account; nothing it creates is world-readable |
 | `StateDirectory=glucose-guardian`, `StateDirectoryMode=0700` | Login state, readable only by the runtime |
-| `RuntimeDirectory=glucose-guardian`, `RuntimeDirectoryMode=0750`, `RuntimeDirectoryPreserve=no` | Snapshot directory readable by the group; removed on stop, which the display shows as "not running" |
+| `RuntimeDirectory=glucose-guardian`, `RuntimeDirectoryMode=0750`, `RuntimeDirectoryPreserve=no` | Snapshot directory readable by the group; removed on stop, which the display shows as "NO DATA" |
 | `LoadCredentialEncrypted=` for both credentials | Only this unit receives the credentials |
 | `Type=notify`, `WatchdogSec=`, `Restart=always`, `RestartSec=` | Supervision (audit finding M6): the tick loop pings the watchdog |
 | `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes` | Least privilege; the runtime keeps network access for Dexcom |
@@ -480,7 +480,7 @@ the state is never lost.
 | Display process crash | systemd | "Display restarting" (`ExecStopPost`, best effort), then the dashboard | `Restart=always` | Unaffected |
 | Display loop hang | Missing watchdog ping | As above, after `WatchdogSec` | Watchdog kill and restart | Unaffected |
 | Rendering error | Exception in the loop; no ping after a failed render | Last good frame until the watchdog fires | Restart | Unaffected |
-| Runtime crash or stop | Snapshot removed, or older than `snapshot_max_age_s` | "NO DATA: Glucose Guardian is not running" | Runtime unit restart (D1) | The Uno's link-lost demand (audible from M6) |
+| Runtime crash or stop | Snapshot removed, or older than `snapshot_max_age_s` | "NO DATA: No recent display data" | Runtime unit restart (D1) | The Uno's link-lost demand (audible from M6) |
 | Runtime loop stalled, process alive | Snapshot ages | As above | Runtime watchdog (D1) | As above |
 | Snapshot corrupt or of another schema | Strict reader | "NO DATA: display data invalid" | Next valid snapshot | Unaffected |
 | Dexcom outage, rate limit, deferred or blocked login | `source_status` and the `acquisition` fault | Connection line; the value turns "LAST KNOWN", then "NO CURRENT DATA" after the cutoff | Existing M4 behavior; a blocked login needs the operator | Existing faults |
@@ -800,10 +800,22 @@ Deviations from the approved design:
 6. **"Display restarting" frame:** no clock and no markers, so a stuck restarting
    screen cannot show a plausible time.
 
+Review correction (PR #10, 2026-11-13):
+
+- A missing or expired snapshot showed "Glucose Guardian is not running". The display
+  cannot know that: the runtime may have stopped, stalled, crashed or lost its
+  snapshot directory, or may still be starting. Both cases now show "NO DATA: No
+  recent display data".
+- The NO DATA state, the suppressed value and trend, and the thresholds
+  (`snapshot_max_age_s`, written-in-the-future) are unchanged.
+- The preview case was renamed `no-data-no-recent-data`.
+- The end-to-end test helper now reads process output on a thread with a real
+  deadline. Before, a missing log line blocked the test instead of failing it.
+
 Verification:
 
 - **Python 3.11.18 and 3.13.18:** ruff clean, mypy strict clean (36 files), pytest
-  1025 passed (761 before).
+  1032 passed after the review correction (1025 before it, 761 before PR A).
 - **Native firmware tests:** 27 of 27; firmware unchanged.
 - **Mutation check:** 19 of 19 mutations of the new safety rules fail the tests. A first
   run found one survivor: drawing any value in the live layout hid the LAST KNOWN
