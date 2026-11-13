@@ -11,9 +11,8 @@ outputs stay disabled until the driver and wiring are reviewed. Preserve indepen
 official Dexcom and Omnipod alerts. This project is supplementary and is not a certified
 medical device. Do not deploy without an explicit request.
 
-Run `cd backend && python -m ruff check src tests && python -m mypy src && python -m pytest`
-and, when available,
-`cd firmware/arduino-uno && pio run`. Add transition, stale-data, failure, and recovery
+Run `make check` (ruff, mypy, pytest, both firmware images and the native firmware
+tests), or `make lint typecheck test` when PlatformIO is unavailable. Add transition, stale-data, failure, and recovery
 tests when changing alarm behavior. Work on feature branches.
 
 ## Development handoff protocol
