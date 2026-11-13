@@ -30,8 +30,13 @@ make simulate
 | `make check` | Everything CI runs |
 | `make simulate` | Runs the simulated runtime from `CONFIG` (default `config/example.toml`) until Ctrl+C |
 | `make simulator` | Runs the synthetic Dexcom Share server on `127.0.0.1:8765` |
+| `make display-preview` | Renders synthetic dashboard PNGs into `build/display-preview` (needs `fonts-dejavu-core`) |
 
 The service logs alarm and fault changes, never glucose values, and drives no outputs.
+With `[display] kind = "snapshot"` it also writes a display snapshot each tick.
+`python -m glucose_guardian.screen --config <file> --png <file>` renders that
+snapshot as the 800×480 bedside dashboard; it has no network access, no credentials
+and, until M5 PR B, no physical screen output.
 `make simulate` withholds systemd credentials, so it can never reach Dexcom. The
 service reads Dexcom Share only with `provider = "dexcom_share"` and systemd-provided
 credentials (see [docs/DEXCOM_SHARE.md](docs/DEXCOM_SHARE.md)). It opens a serial port
@@ -55,7 +60,8 @@ firmware-test`. CI runs no hardware test and never contacts Dexcom.
 
 - `backend/`: Python package: alarm policy, runtime, scenarios, Dexcom Share
   acquisition with a synthetic simulator, display/transport boundaries and doubles,
-  and pytest tests.
+  the display snapshot, screen model, Pillow renderer and display process, and pytest
+  tests.
 - `firmware/arduino-uno/`: PlatformIO firmware: protocol v1, link supervision,
   button classification and watchdog; no pins assigned and outputs disabled.
 - `config/example.toml`, `config/example-dexcom-share.toml`: secret-free example
