@@ -204,6 +204,22 @@ login requests, across restarts too.
 3. Never unblock repeatedly without fixing the cause: every attempt counts toward
    Dexcom's lockout.
 
+## Moving the state file to the installed service
+
+The connectivity check keeps its login state in the file named by
+`config/local.dexcom.toml` (`~/glucose-guardian-state`). When the service is installed
+(M5), the file moves once to `/var/lib/glucose-guardian/dexcom-share-state.json`, by
+the procedure in section 3.8 of the
+[M5 plan](plans/2026-11-13-m5-hdmi-display.md#38-login-state-migration-d9). The exact
+commands follow with the installation.
+
+- **Never reset:** never delete, recreate, edit or unblock the file to simplify the
+  move. A missing file allows an immediate login and forgets a block.
+- **Exact copy:** byte for byte, mode 0600, owned by the service user, verified with
+  `share_state ... status` before the service starts.
+- **One file:** afterwards the check and the service use the same file, and the check
+  never runs while the service is active.
+
 ## SD-card limitations
 
 - The Raspberry Pi 3B has no TPM. `systemd-creds` therefore encrypts with the host key
