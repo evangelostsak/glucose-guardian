@@ -1,0 +1,30 @@
+# Synthetic development values only. Not clinical recommendations.
+provider = "dexcom_share"
+[alarm]
+urgent_low_mg_dl = 55
+low_mg_dl = 70
+high_mg_dl = 250
+hysteresis_mg_dl = 5
+rearm_mg_dl = 10
+max_age_s = 600
+max_future_skew_s = 60
+heartbeat_timeout_s = 5
+glucose_acknowledgement_s = 60
+fault_acknowledgement_s = 60
+[runtime]
+tick_s = 1
+fetch_interval_s = 60
+fetch_timeout_s = 20
+clock_check_interval_s = 60
+clock_check_timeout_s = 5
+[dexcom]
+server = "ous"
+login_min_interval_s = 300
+rate_limit_initial_s = 120
+rate_limit_max_s = 1800
+request_timeout_s = 5
+state_file = "/var/lib/glucose-guardian/dexcom-share-state.json"
+[transport]
+kind = "simulated"
+[hardware]
+outputs_enabled = false

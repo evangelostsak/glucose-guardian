@@ -1,5 +1,314 @@
 # Development log
 
+## 2026-11-13 — M4 read-only security audit
+
+Requirement: Glucose Guardian only authenticates and reads glucose. It never changes
+Dexcom account settings, followers, sharing permissions, alerts, glucose records or
+device configuration.
+
+### Findings
+
+- **Operations:** the code built only three requests: authenticate, login and read.
+  `ShareSession._call` would have sent any URL it was given, though, so the limit held
+  only by convention.
+- **HTTP method:** always POST, hard-coded in `urllib_poster`; the poster has no
+  method parameter.
+- **Redirects:** refused by `_RefuseRedirects`.
+- **Connectivity check:** reaches the network only through `ShareSession.read_raw`.
+- **Network code:** only `share_client.py` imports network client modules;
+  `service.py` imports `ssl` to build the context.
+- **Omnipod:** no Omnipod or Insulet reference exists in code, configuration,
+  deployment files or firmware.
+
+### Changes
+
+- `dexcom_share.check_request` and `ShareRequestRefused` (a `ShareProtocolError`).
+  A request is allowed only if:
+  - the server is one of the three `SERVERS` HTTPS bases, or the loopback simulator
+    `http://127.0.0.1:<port>`;
+  - the endpoint is exactly one of the three;
+  - the two login steps carry no query;
+  - the read query is exactly `sessionId` (UUID), `minutes` (1 to 1440) and
+    `maxCount` (1 to 288), in order;
+  - the JSON body has exactly the documented keys, with string values.
+- `ShareSession._call` runs the check before every request. A refused request sends
+  nothing and becomes an `acquisition` fault.
+
+### Tests
+
+- 68 new tests in `test_share_readonly.py`:
+  - the three operations on all approved servers;
+  - 15 refused endpoints, including example write and management names, path
+    traversal, case changes, fragments and encoded slashes;
+  - 10 refused servers, including plain HTTP, look-alike hosts, user-info tricks,
+    other ports and other loopback addresses;
+  - 16 refused queries and 11 refused bodies;
+  - a session for an unapproved server sends nothing;
+  - a session refuses any other operation before sending;
+  - a recording server that accepts every HTTP method receives only POST, and only
+    for the three operations;
+  - 301, 302, 303, 307 and 308 redirects are never followed;
+  - the poster has no method parameter;
+  - only `share_client.py` can open network connections.
+- `test_share_check.py` now also asserts the check reaches only the three operations.
+- **Python 3.11.18 and 3.13.18:** ruff clean, mypy strict clean (30 files), pytest 663
+  passed.
+- **Mutation check:** 8 mutations, all failing the read-only and check tests:
+  - the check not called;
+  - the redirect handler removed;
+  - an extra endpoint approved;
+  - any server approved;
+  - the body not checked;
+  - a query allowed on login;
+  - the read query not checked;
+  - a simulator pattern that accepts any host.
+
+### Unresolved
+
+- The allowlist cannot prove what Dexcom does with an approved request; it
+  guarantees only what this client sends. The live connectivity check is still
+  pending owner approval.
+
+## 2026-11-13 — M4 review follow-up (PR #7)
+
+The first external review of PR #7, at `bfb4582d`, requested changes in five areas.
+Each finding was first checked against the code. New tests run against `bfb4582d`
+showed the defect, then pass with the fix.
+
+### Findings and resolutions
+
+1. **HTTP success versus valid success** (`share_client.py`):
+   - **Defect:** `ShareSession._call()` cleared the rate-limit state on any HTTP 200,
+     before parsing. After a 429, a malformed or invalid 200 reset the backoff, so
+     the next 429 started again at 120 s instead of doubling. A non-UUID 200 from
+     authenticate had the same effect. The login cooldown and the latch were not
+     affected.
+   - **Fix:** `_call` no longer touches the store. `ShareSession.read` clears the
+     backoff only after `parse_entries` accepts the body; logins never clear it.
+   - **Moved check:** the conflicting-duplicate check moved from `newest` into
+     `parse_entries`, so a response with a conflict never counts as valid.
+   - No extra login attempt was introduced; request counts are asserted.
+2. **Deadline enforcement** (`share_client.py`):
+   - **Defect:** the deadline was checked only between reads, and `http.client`
+     loops over several socket reads inside one `read()`. Measured on `bfb4582d`
+     with a 0.5 s budget:
+     - slow-drip headers, chunked bodies, length-delimited bodies and
+       close-delimited bodies each held the request until the test's 3 s drip
+       stopped;
+     - three unanswered addresses took 1.5 s.
+   - **Extra defect, found while testing:** a body shorter than its declared
+     `Content-Length` was returned as complete. `http.client` `read(amt)` does not
+     raise on a short read.
+   - **Fix:** `urllib_poster` installs its own HTTP and HTTPS connection classes
+     through handler subclasses, so it stays on `urllib`:
+     - each resolved address gets only the remaining budget;
+     - after connect, a `threading.Timer` shuts the socket down at the deadline,
+       through a `dup()` so the TLS-wrapped socket is reached too;
+     - a request whose deadline expired fails with "request deadline exceeded",
+       even if bytes arrived;
+     - a body shorter than its `Content-Length` is a transport error;
+     - the timer is cancelled and joined in every case.
+   - **Leak check:** 40 timed-out HTTP and HTTPS requests left the open
+     file-descriptor and thread counts unchanged.
+   - **Limitation, documented:** `getaddrinfo` cannot be interrupted. A slow
+     resolver delays the request, which then fails at once. The `BoundedWorker`
+     still holds at most one job.
+3. **Schema compatibility** (`dexcom_share.py`):
+   - The five keys are required; additional fields are ignored and never read.
+   - Value, timestamp and trend validation are unchanged, and additional fields
+     never excuse a malformed required field.
+   - The connectivity check reports missing required keys and the number of
+     additional keys, never their values.
+4. **Persistence failures** (`share_state.py`):
+   - **Defect 1:** the attempt record was durable before every login, but a block
+     whose write failed lived only in memory. After a restart the service logged in
+     again 300 s later; the test reproduced this on `bfb4582d`.
+   - **Fix 1:** the attempt record now also sets `login_pending`, and the session
+     clears it once the outcome is recorded, in a `finally`. A state file still
+     showing `login_pending` at load blocks automatic login as
+     `LoginOutcomeUnknown` until an operator unblocks. A failed clearing write is
+     retried by the next valid read.
+   - **429 backoff that cannot be written:**
+     - during a login, the outcome stays unrecorded, so a restart blocks;
+     - during a read, the running process keeps it in memory, and after a restart
+       the persisted login interval bounds the first request instead.
+   - **Defect 2:** a stale `.partial` file with mode 0644 made the state file 0644,
+     and a failed rename left the partial file behind; both were reproduced.
+   - **Fix 2:** `write_state` forces 0600 with `fchmod` and removes the partial file
+     on failure, leaving the previous state intact.
+   - The state file still holds no credentials, account ids or session ids;
+     `login_pending` is a boolean.
+5. **README:** no longer says no Uno has been flashed:
+   - it records the owner-run M3 bench validation, including the watchdog test, and
+     the verified restore of the production firmware;
+   - it says only the bench harness has run on the Pi;
+   - it says nothing is connected to the Uno's pins, so the siren, bed shaker,
+     button, display and the alarm system as a whole are not validated.
+
+### Changes to existing tests
+
+None of these weakens an assertion:
+
+- `test_unknown_entry_structures_are_rejected` asserted that an extra field is
+  rejected, which finding 3 reverses. Its other cases moved into
+  `test_entries_missing_a_required_key_are_rejected`, now one case per required key,
+  and `test_entries_that_are_not_objects_are_rejected`.
+- `test_slow_and_hung_responses_end_within_the_request_deadline` now matches "deadline
+  exceeded" instead of "TimeoutError". The error class and the 2 s bound are
+  unchanged.
+- `test_login_interval_holds_within_and_across_restarts` and
+  `test_reboot_restarts_the_cooldown_from_the_new_boot` now record the attempt's
+  outcome before the simulated restart. Without it, the new latch correctly blocks;
+  that case has its own tests.
+- `test_check_describes_unexpected_shapes_without_values` asserts the new missing and
+  additional key lines.
+- `test_state_store_has_no_place_for_secrets` includes `login_pending` and checks its
+  type.
+
+### Test results
+
+- **Python 3.11.18 and 3.13.18:** ruff clean, mypy strict clean (30 files), pytest
+  595 passed. Relative to `bfb4582d`, 5 test cases were replaced
+  and 60 added.
+- **Deadline tests:** stable over 5 repeated runs and 3 runs with every CPU core busy.
+- **Firmware:** unchanged; `pio run -e uno` and `-e uno-watchdog-test` succeed, the
+  native tests pass 27 of 27, and the production hex is still `bde6b740…`.
+- **Mutation check:** 19 mutations of the new safeguards (backoff clearing, deadline
+  timer, `dup`, per-address budget, expiry reporting, declared length, login outcome
+  marker, required and additional keys, duplicate check, partial-file mode and cleanup,
+  state type check, check output). On the first run 18 failed the suite. The survivor, a
+  missing `fchmod`, exposed a test that wrote twice and so hid the defect. With the test
+  tightened to a single write, all 19 fail the suite.
+
+### Unresolved
+
+- The live-response assumptions in DEXCOM_SHARE.md still need the owner-approved
+  connectivity check.
+- A stop, crash or power loss during a login now needs an operator unblock. This is
+  the fail-closed choice: the outcome cannot be known.
+- DNS resolution remains outside the request deadline.
+
+## 2026-11-12 — M4 Dexcom Share acquisition
+
+### Research (before implementation)
+
+Sources read on 2026-11-12:
+
+- `pydexcom` `main`: `const.py`, `dexcom.py`, `errors.py`, `glucose_reading.py`,
+  `README.md`;
+- `nightscout-connect` `lib/sources/dexcomshare.js`;
+- `share2nightscout-bridge` `index.js` and `README.md`. The bridge is deprecated and
+  points to nightscout-connect;
+- Dexcom's official API documentation of the 39 and 401 values;
+- Nightscout PR #7207 (LOW and HIGH for `share2` devices).
+
+Findings:
+
+- **Account:** the API authenticates the **publisher** account. pydexcom: "*not
+  follower*"; its FAQ: "Use the same credentials used to login to the Dexcom mobile
+  application publishing the glucose readings". The bridge "logs in to Dexcom Share as
+  the data publisher". Neither client has a follower login, so a dedicated follower
+  account is not supported. No account, invitation or follower setting was created or
+  changed.
+- **Endpoints and identifiers:** confirmed by both clients, including the outside-US
+  host `shareous1.dexcom.com` and the shared US and outside-US application id.
+- **Reading time:** pydexcom reads `DT` (with an offset), Nightscout reads `WT`. `WT`
+  was chosen; the connectivity check measures any disagreement.
+- **LOW and HIGH:** neither Share client special-cases them. Dexcom's official API
+  uses 39 and 401, and Nightscout displays them as LOW and HIGH for Share devices.
+  This is not confirmed for Share responses.
+- **No timeouts:** neither client sets one. pydexcom renews a session once on a session
+  error. nightscout-connect refreshes after about 23 h 50 min.
+
+### Changes and decisions
+
+- New modules:
+  - `dexcom_share.py`: protocol and strict parsing;
+  - `share_client.py`: `urllib` poster, `ShareSession`, `DexcomShareProvider`;
+  - `share_state.py`: persisted login state plus `status`/`unblock`;
+  - `credentials.py`;
+  - `share_simulator.py`;
+  - `share_check.py`: read-only connectivity check.
+- `config.py`: `provider = "dexcom_share"` with a strict `[dexcom]` table.
+  `[simulation]` is required only for the simulated provider, and the existing
+  rejections of `[dexcom]` with the simulated provider and of `provider = "dexcom"`
+  still hold.
+- `service.py`: Dexcom wiring with the systemd clock check. It exits with status 2 when
+  credentials or the state directory are missing.
+- Other files:
+  - `config/example-dexcom-share.toml` holds the approved values;
+  - the systemd template gained `LoadCredentialEncrypted=`, `StateDirectory=` and
+    `StateDirectoryMode=0700`.
+- Decisions:
+  - `WT` is the reading time, never the receipt time;
+  - an entry has exactly `WT`, `ST`, `DT`, `Value` and `Trend`;
+  - `Value` is an integer from 39 to 401;
+  - unknown trends, encodings and conflicting duplicates fail the fetch, as an
+    acquisition fault, rather than being guessed;
+  - the newest entry by timestamp wins, and older or repeated readings are not
+    returned again;
+  - at most 3 requests per fetch;
+  - environment proxies are ignored, and `User-Agent` is `glucose-guardian/<version>`.
+- Login protection:
+  - a hard 300 s floor between login attempts;
+  - each attempt persisted before the request, with a cooldown on `CLOCK_BOOTTIME`
+    within a boot;
+  - after a reboot, the first login waits 300 s, because the Pi has no real-time clock;
+  - a latch on `AccountPasswordInvalid`, `SSO_AuthenticateMaxAttemptsExceeded`,
+    `SSO_InternalError` with a rejected-login message, `InvalidArgument` during login,
+    or a nil identifier;
+  - an unreadable state file blocks login and an unwritable one refuses every login;
+  - HTTP 429 backoff from 120 s to 1800 s, honoring `Retry-After`. These values are
+    provisional.
+- The state file holds no credentials, account id or session id. Errors and logs carry
+  only classes, HTTP statuses and Share codes, never server messages, URLs, values or
+  secrets.
+
+### Hardware and protocol record
+
+- No GG1, firmware, GPIO, output, threshold or acknowledgement change. The production
+  hex is unchanged (`bde6b740…`).
+- New network dependency: outbound HTTPS to `shareous1.dexcom.com` when
+  `provider = "dexcom_share"`.
+
+### Validation
+
+- **Python 3.11.18 and 3.13.18:** ruff clean, mypy strict clean (30 files), pytest
+  540 passed. That is the 383 existing tests, unchanged, and 157 new: protocol, state,
+  credentials, client, runtime integration, connectivity check, configuration and
+  service. They cover:
+  - login success and failure, latching, lockout;
+  - session expiry and renewal, the login interval across restarts and reboots;
+  - HTTP 429 with and without `Retry-After`;
+  - HTTP and HTML errors, redirects, malformed and oversized bodies, slow and hung
+    responses, refused connections;
+  - a self-signed TLS certificate refused, environment proxies ignored;
+  - duplicate, stale, out-of-order and future readings, an unsynchronized clock;
+  - a hung request holding one worker thread, recovery after outages;
+  - secret redaction;
+  - the real service process reading from the simulator.
+- **Mutation check:** 24 safeguard mutations. The first run left one survivor: the
+  streaming body cap, previously covered only through `Content-Length`. Two tests were
+  added, and all 24 now fail the suite.
+- **Firmware:** both images build, and the native tests pass 27 of 27.
+- **No live Dexcom request** and no real credentials or glucose data were used.
+
+### Unresolved issues
+
+- Assumptions about Share need the owner-approved connectivity check:
+  - the response shape and the `sessionId` spelling;
+  - `WT`, `ST` and `DT` agreement and the trend format;
+  - acceptance of the `User-Agent`.
+
+  LOW and HIGH need a real out-of-range reading.
+- The session lifetime and rate-limit behavior are unknown; the 429 backoff values
+  are provisional.
+- DNS resolution is not covered by the request deadline. It is bounded by the
+  resolver, and the worker contains it.
+- The systemd clock check has not run on the Pi.
+- The credentials are protected only by the SD card's host key (no TPM).
+- README still says no Uno has been flashed, which has been false since PR #6.
+
 ## 2026-11-12 — M3 hardware bench validation recorded
 
 ### Results (owner-reported from the physical bench)

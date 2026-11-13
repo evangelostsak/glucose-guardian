@@ -22,9 +22,9 @@ the link stays lost. The firmware has no button pin and drives no output yet.
 ## Failure modes
 
 The runtime connects the alarm engine to bounded acquisition, a clock check, a
-display frame and either a transport double or the serial transport (M3). There is
-still no Dexcom adapter, GUI or physical output, and no hardware has been flashed.
-"Simulated" below means verified with synthetic scenarios; "PC-tested" means verified
+display frame and either a transport double or the serial transport (M3). The Dexcom
+Share adapter (M4) has been tested only against a synthetic simulator, never against
+Dexcom. There is no GUI and no physical output. "Simulated" below means verified with synthetic scenarios; "PC-tested" means verified
 with pseudo-terminals, a Python Uno emulator, and native firmware unit tests.
 
 | Condition | Detected by | Indication | Status |
@@ -33,7 +33,19 @@ with pseudo-terminals, a Python Uno emulator, and native firmware unit tests.
 | Reading below 40 or above 400 mg/dL | Normal threshold classification | Urgent low or high glucose alarm (with the configured thresholds) | Engine implemented |
 | No reading, or reading older than `max_age_s` | Validation | `missing_data` fault; unresolved glucose alarm kept and shown as last known with its age; normal becomes unknown | Simulated |
 | Non-numeric, non-finite or non-positive value; naive timestamp; timestamp more than 60 s in the future | Validation | `invalid_reading` fault | Simulated |
-| Fetch error or exception | Acquisition worker | `acquisition` fault; latest reading used until stale | Simulated; Dexcom adapter M4 |
+| Fetch error or exception | Acquisition worker | `acquisition` fault; latest reading used until stale | Simulated; Dexcom Share adapter tested against the simulator |
+| Dexcom Share unreachable: DNS, refused or reset connection, TLS failure, request deadline | `ShareTransportError` | `acquisition` fault, then `missing_data` after `max_age_s`; recovers on the next successful fetch | Simulator and TLS tests; not run against Dexcom |
+| Dexcom Share slow or stalled: unanswered connect, slow-drip TLS handshake, headers or body, body shorter than its `Content-Length` | Per-request deadline enforced on the socket; declared-length check | `ShareTransportError` at `request_timeout_s`; a cut-short body is never accepted. DNS resolution cannot be interrupted, so a slow resolver delays the request; it then fails at once | Loopback slow-drip, backlog and resolver tests; not run against Dexcom |
+| Dexcom Share HTTP error, HTML error page, redirect, oversized or malformed body, missing or malformed required entry field, unknown trend, value outside 39 to 401, conflicting duplicates | `ShareServerError`, `ShareProtocolError`, `ShareTransportError` | `acquisition` fault; never treated as a reading; no login latch; an HTTP 200 with such a body does not clear a rate-limit backoff. Additional entry fields are ignored | Simulator tests; real response shape unverified |
+| Request to any Share operation other than authenticate, login or read, to any other host, or with an unexpected query or body (programming error or misconfiguration) | `check_request` allowlist before sending | `ShareRequestRefused`, an `acquisition` fault; nothing is sent. Only POST is possible and redirects are refused | Unit, wire-level and mutation tests |
+| Dexcom Share session expired | `SessionIdNotFound` or `SessionNotValid` | One login and read if the 300 s login interval allows; otherwise `acquisition` fault until it does | Simulator tests |
+| Rejected credentials or account lockout (`AccountPasswordInvalid`, `SSO_AuthenticateMaxAttemptsExceeded`, rejected login, nil identifier) | Login response | Automatic login blocked and persisted across restarts; status `auth_blocked`; `acquisition` and then `missing_data` faults; operator must fix and unblock | Simulator tests |
+| Dexcom Share rate limit (HTTP 429) | Response status | Exponential backoff (120 s to 1800 s, `Retry-After` honored); `acquisition` fault while backing off | Simulator tests; values provisional |
+| Service crash loop or restart | Persisted login state | At most one login attempt per 300 s within a boot; after a reboot the first login waits 300 s | Unit and simulator tests |
+| Login outcome not recorded: crash, stop or power loss during a login, or the block or outcome write fails | `login_pending` still set in the state file at load | Automatic login blocked (`LoginOutcomeUnknown`) until an operator checks and unblocks, so a credential rejection that was never written cannot be retried after a restart; status `auth_blocked` with `acquisition` and then `missing_data` faults | Unit and simulator tests with injected write failures |
+| HTTP 429 backoff from a read cannot be written | Write error logged | The running process keeps the backoff; after a restart the persisted 300 s login interval bounds the first request instead | Unit tests with injected write failures |
+| Dexcom Share returns the same, an older or no reading (phone not uploading) | Provider keeps the newest reading | Reading ages into `missing_data` after `max_age_s` | Simulator tests |
+| Dexcom LOW or HIGH | Values 39 and 401 (assumed encoding) | Urgent low or high through the unchanged thresholds; another encoding becomes an `acquisition` fault | Assumption pending a live response |
 | Fetch blocked or slower than `fetch_timeout_s` | Acquisition worker hard timeout | `acquisition` fault; supervisor keeps ticking; one thread at most | Simulated |
 | Pi clock not synchronized (no RTC on the Pi 3B), or the check fails or times out | Clock-check worker | `clock_unsynchronized` fault; readings not evaluated | Simulated; systemd check unit-tested, not yet run on the Pi |
 | Uno silent, unplugged, or answering with corrupted, outdated, duplicate or wrong-version frames | Round-trip link age above `heartbeat_timeout_s` | `communication` fault; port reopened with backoff | PC-tested; on the USB bench (owner-reported 2026-11-12): Uno rejection of invalid frames, recovery after a heartbeat pause, unplug detection, reconnect and backoff passed |

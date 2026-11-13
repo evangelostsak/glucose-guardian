@@ -6,10 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from .alarms import Policy
+from .dexcom_share import MAX_REQUESTS_PER_FETCH, SERVERS
 from .simulation import SCENARIOS
 
-PROVIDERS = frozenset({"simulated"})
+PROVIDERS = frozenset({"simulated", "dexcom_share"})
 TRANSPORTS = frozenset({"simulated", "serial"})
+SHARE_SERVERS = frozenset(SERVERS) | {"simulator"}
+MIN_LOGIN_INTERVAL_S = 300.0
 
 
 class ConfigError(ValueError):
@@ -33,12 +36,32 @@ class SerialSettings:
 
 
 @dataclass(frozen=True)
+class DexcomSettings:
+    server: str
+    simulator_port: int | None
+    login_min_interval_s: float
+    rate_limit_initial_s: float
+    rate_limit_max_s: float
+    request_timeout_s: float
+    state_file: Path
+
+
+@dataclass(frozen=True)
+class _ShareTiming:
+    login_min_interval_s: float
+    rate_limit_initial_s: float
+    rate_limit_max_s: float
+    request_timeout_s: float
+
+
+@dataclass(frozen=True)
 class Config:
     provider: str
-    scenario: str
+    scenario: str | None
     policy: Policy
     runtime: RuntimeSettings
     serial: SerialSettings | None
+    dexcom: DexcomSettings | None
 
 
 def load_config(path: Path) -> Config:
@@ -53,16 +76,22 @@ def load_config(path: Path) -> Config:
 
 
 def _parse(data: dict[str, Any], source: str) -> Config:
-    _check_keys(data, {"provider", "alarm", "runtime", "simulation", "transport"}, {"hardware"},
-                "top level", source)
+    if "provider" not in data:
+        raise ConfigError(f"{source}: top level is missing ['provider']")
     provider = data["provider"]
-    if provider not in PROVIDERS:
-        raise ConfigError(f"{source}: provider must be one of {sorted(PROVIDERS)}; "
-                          "real acquisition is not available yet")
-    simulation = _table(data, "simulation", source)
-    _check_keys(simulation, {"scenario"}, set(), "[simulation]", source)
-    if simulation["scenario"] not in SCENARIOS:
-        raise ConfigError(f"{source}: [simulation] scenario must be one of {sorted(SCENARIOS)}")
+    if not isinstance(provider, str) or provider not in PROVIDERS:
+        raise ConfigError(f"{source}: provider must be one of {sorted(PROVIDERS)}")
+    acquisition = "simulation" if provider == "simulated" else "dexcom"
+    _check_keys(data, {"provider", "alarm", "runtime", "transport", acquisition}, {"hardware"},
+                "top level", source)
+    scenario = None
+    if provider == "simulated":
+        simulation = _table(data, "simulation", source)
+        _check_keys(simulation, {"scenario"}, set(), "[simulation]", source)
+        if simulation["scenario"] not in SCENARIOS:
+            raise ConfigError(f"{source}: [simulation] scenario must be one of "
+                              f"{sorted(SCENARIOS)}")
+        scenario = simulation["scenario"]
     if "hardware" in data:
         hardware = _table(data, "hardware", source)
         _check_keys(hardware, set(), {"outputs_enabled"}, "[hardware]", source)
@@ -76,8 +105,44 @@ def _parse(data: dict[str, Any], source: str) -> Config:
     runtime = RuntimeSettings(**_numbers(_table(data, "runtime", source), RuntimeSettings,
                                          "[runtime]", source))
     _check_runtime(runtime, policy, source)
-    return Config(provider, simulation["scenario"], policy, runtime,
-                  _serial(_table(data, "transport", source), source))
+    dexcom = None if provider == "simulated" \
+        else _dexcom(_table(data, "dexcom", source), runtime, source)
+    return Config(provider, scenario, policy, runtime,
+                  _serial(_table(data, "transport", source), source), dexcom)
+
+
+def _dexcom(table: dict[str, Any], runtime: RuntimeSettings, source: str) -> DexcomSettings:
+    server = table.get("server")
+    if not isinstance(server, str) or server not in SHARE_SERVERS:
+        raise ConfigError(f"{source}: [dexcom] server must be one of {sorted(SHARE_SERVERS)}")
+    timing_keys = {field.name for field in fields(_ShareTiming)}
+    port_keys = {"simulator_port"} if server == "simulator" else set()
+    _check_keys(table, {"server", "state_file"} | timing_keys | port_keys, set(), "[dexcom]",
+                source)
+    timing = _ShareTiming(**_numbers({key: table[key] for key in timing_keys}, _ShareTiming,
+                                     "[dexcom]", source))
+    port = table["simulator_port"] if port_keys else None
+    if port_keys and (isinstance(port, bool) or not isinstance(port, int)
+                      or not 1 <= port <= 65535):
+        raise ConfigError(f"{source}: [dexcom] simulator_port must be an integer port")
+    state_file = table["state_file"]
+    if not isinstance(state_file, str) or not Path(state_file).is_absolute():
+        raise ConfigError(f"{source}: [dexcom] state_file must be an absolute path")
+    rules = (
+        (timing.login_min_interval_s >= MIN_LOGIN_INTERVAL_S,
+         f"[dexcom] login_min_interval_s must be at least {MIN_LOGIN_INTERVAL_S:g}"),
+        (timing.rate_limit_initial_s <= timing.rate_limit_max_s,
+         "[dexcom] rate_limit_initial_s must not exceed rate_limit_max_s"),
+        (timing.request_timeout_s * MAX_REQUESTS_PER_FETCH <= runtime.fetch_timeout_s,
+         f"[dexcom] request_timeout_s times {MAX_REQUESTS_PER_FETCH} must not exceed "
+         "[runtime] fetch_timeout_s"),
+    )
+    for ok, message in rules:
+        if not ok:
+            raise ConfigError(f"{source}: {message}")
+    return DexcomSettings(server, port, timing.login_min_interval_s,
+                          timing.rate_limit_initial_s, timing.rate_limit_max_s,
+                          timing.request_timeout_s, Path(state_file))
 
 
 def _serial(transport: dict[str, Any], source: str) -> SerialSettings | None:

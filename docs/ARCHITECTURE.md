@@ -20,12 +20,19 @@ process (M6); the supplied unit is an uninstalled template.
 | `link.py` | Pi-side link state: liveness, replay rejection, reset detection, button counters |
 | `serial_transport.py` | pyserial transport with bounded reads and reconnect backoff |
 | `runtime.py` | Fixed-rate supervisory loop wiring the above |
-| `service.py` | Simulated runtime entry point |
+| `service.py` | Runtime entry point with simulated or Dexcom Share acquisition |
+| `dexcom_share.py` | Dexcom Share protocol: endpoints, request bodies, strict parsing, error classes; no I/O |
+| `share_client.py` | `urllib` HTTPS poster, login state machine (`ShareSession`), `DexcomShareProvider` |
+| `share_state.py` | Persisted login cooldown, rate limit and block latch; `status`/`unblock` commands; no secrets |
+| `credentials.py` | Publisher credentials from `$CREDENTIALS_DIRECTORY` |
+| `share_simulator.py` | Local synthetic Dexcom Share server (tests, soak runs) |
+| `share_check.py` | Read-only connectivity check that prints structure, never values |
 
 `alarms.py` takes the latest reading, UTC time, monotonic time, acquisition status,
 clock synchronization status and heartbeat age, all as required arguments. Every call
 re-evaluates data age and heartbeat age, so the fixed-rate runtime detects faults
-independently of when readings arrive. There is no Dexcom adapter or GUI yet. The Uno
+independently of when readings arrive. Dexcom Share acquisition is described below
+and in [DEXCOM_SHARE.md](DEXCOM_SHARE.md); there is no GUI yet. The Uno
 firmware lives in `firmware/arduino-uno/lib/guardian/` (testable C++) with Arduino
 glue in `src/main.cpp`; the protocol is specified in [PROTOCOL.md](PROTOCOL.md).
 
@@ -156,9 +163,9 @@ fault) and the clock is untrusted until its first check completes.
 
 `systemd_clock_synchronized` runs `timedatectl show --property=NTPSynchronized
 --value` with a timeout. Only exit status 0 with output `yes` counts as synchronized;
-any error, timeout or other output means untrusted. The simulated service takes clock
-status from the scenario instead; the systemd check is wired to the real runtime in
-M4/M6 and must be validated on Debian 13 on the Pi.
+any error, timeout or other output means untrusted. With `provider = "dexcom_share"`
+the service uses this check; the simulated provider takes clock status from the
+scenario. It has not yet been run on Debian 13 on the Pi.
 
 ### Adapter failures and crashes
 
@@ -186,18 +193,21 @@ rejected), and `[alarm]` builds a validated `Policy`.
 
 | Table | Keys |
 |---|---|
-| top level | `provider` (only `"simulated"` until M4) |
+| top level | `provider`: `"simulated"` (needs `[simulation]`) or `"dexcom_share"` (needs `[dexcom]`) |
 | `[alarm]` | the ten `Policy` fields |
 | `[runtime]` | `tick_s`, `fetch_interval_s`, `fetch_timeout_s`, `clock_check_interval_s`, `clock_check_timeout_s` |
 | `[simulation]` | `scenario` (a name from `SCENARIOS`) |
+| `[dexcom]` | `server` (`us`, `ous`, `jp`, `simulator` with `simulator_port`), `login_min_interval_s` (at least 300), `rate_limit_initial_s`, `rate_limit_max_s`, `request_timeout_s`, `state_file` (absolute) |
 | `[transport]` | `kind = "simulated"` alone, or `kind = "serial"` with `device`, `reconnect_initial_s`, `reconnect_max_s` |
 | `[hardware]` | optional; `outputs_enabled` may only be `false` |
 
 The only default is the fail-safe one: a missing `[hardware]` table means outputs
 disabled. Cross-checks: `tick_s < heartbeat_timeout_s`, `fetch_timeout_s <=
 fetch_interval_s`, `fetch_interval_s < max_age_s`, `clock_check_timeout_s <=
-clock_check_interval_s`, `reconnect_initial_s <= reconnect_max_s`. The file holds no credentials; unknown keys such as
-`password` are rejected, and Dexcom credentials will use systemd credentials (M4).
+clock_check_interval_s`, `reconnect_initial_s <= reconnect_max_s`,
+`rate_limit_initial_s <= rate_limit_max_s`, `3 * request_timeout_s <= fetch_timeout_s`.
+The file holds no credentials; unknown keys such as `password` are rejected, and Dexcom
+credentials come from systemd credentials.
 
 ## Simulation
 
@@ -215,13 +225,120 @@ segment ends, which keeps every scenario deterministic.
 
 ## Service
 
-`python -m glucose_guardian.service --config <file>` runs the configured scenario in
-real time with daemon-thread workers, a log display and the configured transport. A
+`python -m glucose_guardian.service --config <file>` runs the configured scenario, or
+Dexcom Share acquisition with the systemd clock check, in real time with daemon-thread
+workers, a log display and the configured transport. With `dexcom_share`, missing
+credentials or a missing state directory stop the service at startup with exit
+status 2. A
 serial transport gets a random 16-bit session per process. It
 stops on SIGTERM or SIGINT and restores the previous signal handlers. Exit status: 0
 stopped, 1 crashed, 2 configuration error. Logs contain levels and fault names, never
 glucose values. Stopping the service stops heartbeats, which the Uno will treat as a
 communication fault; a planned stop is not silent.
+
+## Dexcom Share acquisition
+
+`DexcomShareProvider` implements `GlucoseProvider` on the read-only, undocumented Share
+API. The full findings, assumptions and operator procedures are in
+[DEXCOM_SHARE.md](DEXCOM_SHARE.md). The client authenticates the publisher account,
+because the API has no follower login.
+
+**Each fetch** runs in the existing `BoundedWorker`, so at most one request is ever in
+flight. A fetch makes at most three HTTP requests:
+
+- the first: authenticate, login, read;
+- after a session error: read, login, read.
+
+Each request:
+
+- has its own `request_timeout_s` deadline and a 64 KiB body cap;
+- verifies TLS against the system CA store;
+- refuses redirects and ignores environment proxies;
+- is never retried.
+
+**Read-only allowlist.** Before anything is sent, `ShareSession._call` passes every
+request through `dexcom_share.check_request`. The request must meet all of these:
+
+- **Server:** one of the three Dexcom Share hosts in `SERVERS`, over HTTPS, or the
+  loopback simulator `http://127.0.0.1:<port>`.
+- **Endpoint:** exactly `General/AuthenticatePublisherAccount`,
+  `General/LoginPublisherAccountById` or `Publisher/ReadPublisherLatestGlucoseValues`.
+- **Query:** none for the two login steps. For the read, exactly `sessionId` (a UUID),
+  `minutes` (1 to 1440) and `maxCount` (1 to 288), in that order.
+- **Body:** a JSON object with exactly the documented keys and string values. The read
+  body is `{}`.
+
+Anything else raises `ShareRequestRefused` (a protocol error) and sends nothing.
+`urllib_poster` only sends POST, has no method or header parameter, and refuses every
+redirect. Only `share_client.py` imports network client modules (`service.py` imports
+`ssl` only to build the TLS context), and a test enforces this.
+
+**Deadline enforcement.** `urllib_poster` installs its own HTTP and HTTPS connection
+classes, so the deadline covers more than each single socket operation:
+
+- **Connect:** each resolved address gets only the remaining budget, so several
+  unanswered addresses share one deadline.
+- **After connect:** a timer shuts the socket down when the deadline passes (on a
+  `dup()` of it, so the TLS socket is reached too). This ends a blocked or slow-drip
+  TLS handshake, header read or body read at the deadline, however the peer paces
+  its bytes.
+- **Reported failure:** a request that reaches its deadline fails with "request
+  deadline exceeded", even if bytes arrived meanwhile, so a body cut short by the
+  shutdown is never accepted.
+- **Declared length:** a body shorter than its `Content-Length` is a transport error.
+  `http.client` returns it silently otherwise.
+- **Timer threads:** the timer is cancelled and joined when the request ends, so no
+  thread or socket outlives it.
+
+DNS resolution (`getaddrinfo`) cannot be interrupted. A slow resolver delays the
+request by its own timeout, and the request then fails at once because the deadline
+has passed. The `BoundedWorker` still holds at most one acquisition job, so a slow
+resolver delays acquisition but starts no new thread.
+
+**Login state** (`share_state.py`), persisted in `state_file`:
+
+- **Cooldown:** at least `login_min_interval_s` between login attempts, written
+  *before* each attempt and measured on `CLOCK_BOOTTIME`. That write also sets
+  `login_pending`. The flag is cleared only once the attempt's outcome has been
+  recorded: success, a transport, server or protocol error, a rate limit, or a block.
+  A state file still showing `login_pending` at load means an outcome was lost, for
+  example to a crash or a failed write. Automatic login then stays blocked
+  (`LoginOutcomeUnknown`) until an operator unblocks.
+- **Rate limiting:** HTTP 429 backs off exponentially, honoring `Retry-After` in
+  seconds. The backoff is cleared only by a read whose body passes `parse_entries`,
+  never by a bare HTTP 200 or a login.
+- **Latch:** rejected credentials, a lockout, a malformed login argument or a nil
+  identifier block automatic login until an operator runs `share_state ... unblock`.
+- **Restarts:** a restart within the same boot keeps the cooldown, and a reboot
+  restarts it from service start.
+- **Damaged or unwritable file:** an unreadable state file blocks login; an
+  unwritable one refuses every login, because the attempt record must be written
+  before any request. If a later write fails, the running process still keeps the
+  block or backoff in memory. After a restart:
+  - an unrecorded login outcome blocks, as above;
+  - an unrecorded backoff from a read is replaced by the persisted login interval,
+    because a restarted service has no session and must log in first.
+- **Writes:** mode 0600 (also forced on a leftover partial file), `fsync`, an atomic
+  rename and a directory `fsync`. A failed write removes the partial file and leaves
+  the previous state intact.
+
+**Parsing:**
+
+- an entry must have `WT`, `ST`, `DT`, `Value` and `Trend`; additional fields are
+  ignored and never read;
+- `WT` (UTC) is the reading time, and the receipt time is never substituted;
+- `Value` is an integer from 39 (LOW) to 401 (HIGH), classified by the unchanged
+  thresholds;
+- the newest entry by timestamp wins;
+- identical duplicates collapse, and conflicting ones fail the whole response;
+- older or repeated readings are not returned again, so their age grows into
+  `missing_data`.
+
+Every failure raises a `ShareError` and becomes the runtime's `acquisition` fault.
+`DexcomShareProvider.status` tells a blocked login apart from network, server,
+protocol, rate-limit and deferred-login states, for M5. `latest_trend` keeps the trend
+for M5; no alarm uses it. Logs and exceptions carry only error classes, HTTP statuses
+and Share error codes: never credentials, identifiers, URLs, server messages or values.
 
 ## Serial transport
 
