@@ -197,14 +197,14 @@ M6 Deployment hardening and M7 Hardware integration.
 |---|---|---|---|
 | M0 to M3 | Housekeeping, alarm policy v2, simulated runtime, serial protocol v1 and firmware | Done; M3 bench-validated | |
 | M4 Dexcom Share acquisition | Read-only Share client, login protection, connectivity check | Done; live-validated 2026-11-13 | |
-| M5 HDMI display | Standalone bedside dashboard on the Waveshare 5-inch 800×480 display; display only | [Plan](plans/2026-11-13-m5-hdmi-display.md) proposed, awaiting approval | M4; a runtime supervised by systemd (decision D1 in the plan) |
+| M5 HDMI display | Standalone bedside dashboard on the Waveshare 5-inch 800×480 display; display only | [Plan](plans/2026-11-13-m5-hdmi-display.md) reviewed; owner decisions recorded 2026-11-13; implementation not started | M4; a runtime supervised by systemd (D1, approved); the framebuffer smoke test G1 before the output backend is fixed; the login-state migration before the service starts (D9) |
 | M6 Physical siren and alarm hardware | Siren driver and Uno alarm outputs, the button, the audible link-lost alarm, hardware-in-the-loop tests | Not started | Components purchased; wiring and electrical review, including the Uno power topology (audit finding H5); retained-level persistence; explicit approval |
 | M7 Bed shaker and additional hardware | Bed-shaker driver, backup power and other peripherals | Not started | M6; components; wiring review |
 
 Deployment hardening is no longer a milestone of its own:
 
-- systemd supervision of the runtime is proposed for M5, because the display depends
-  on it (D1);
+- systemd supervision of the runtime is part of M5, because the display depends on it
+  (D1, approved);
 - persisting the retained alarm level is scheduled before physical alarm outputs
   (M6);
 - the hardware review may require backup power before any audible output, which would
@@ -216,11 +216,18 @@ there means deployment hardening and "M7" hardware integration.
 ## Next milestone
 
 - **M5 HDMI display:** the design and implementation plan,
-  [plans/2026-11-13-m5-hdmi-display.md](plans/2026-11-13-m5-hdmi-display.md), awaits
-  owner approval and the decisions in its section 9. No M5 code exists.
+  [plans/2026-11-13-m5-hdmi-display.md](plans/2026-11-13-m5-hdmi-display.md), was
+  reviewed on 2026-11-13. The owner decisions are recorded in its section 9:
+  - Pillow is the renderer; `/dev/fb0` becomes the output backend only after the
+    smoke test G1 on the real panel;
+  - a last known value is hidden after a display cutoff, provisionally 30 minutes;
+  - the login state moves to the service's state directory by an exact, verified copy,
+    never a reset;
+  - the soak uses the simulated transport first.
+
+  No M5 code exists. PR A (offline) is the next implementation step.
 - **Open from M4:**
-  - the soak against Share with outputs disabled, proposed as part of the M5 Pi
-    validation;
+  - the soak against Share with outputs disabled, part of the M5 Pi validation;
   - confirmation of the LOW and HIGH encodings when such a reading occurs.
 
 ## Known blockers and gaps
@@ -230,7 +237,8 @@ there means deployment hardening and "M7" hardware integration.
   - buzzer and bed-shaker electrical integration;
   - the physical button;
   - power-loss resilience;
-  - the Waveshare 800×480 display (M5; checks H1 to H12 in its plan).
+  - the Waveshare 800×480 display (M5: smoke test G1, then checks H1 to H14 in its
+    plan).
 - With Optiboot 4.4, power-on, brown-out and external resets all report `U`. A
   watchdog reset while the Pi is disconnected is lost from `cause` when the Pi
   reconnects, because opening the port resets the Uno again.
@@ -242,9 +250,13 @@ there means deployment hardening and "M7" hardware integration.
 - Dexcom Share is undocumented. One read-only connectivity check passed on 2026-11-13.
   The LOW and HIGH encoding, the session lifetime, the rate-limit behavior and the
   error responses remain assumptions until real events confirm them.
-- The connectivity check used the state file in `~/glucose-guardian-state`. An
-  installed service must share one state file with the check, so that the 300 s login
-  interval spans both (decision D9 in the M5 plan).
+- The connectivity check used the state file in `~/glucose-guardian-state`. When the
+  service is installed, the file moves to `/var/lib/glucose-guardian` by the procedure
+  in section 3.8 of the M5 plan: an exact copy with mode 0600, verified, never reset
+  or unblocked. Afterwards the check and the service use that one file and never run
+  at the same time.
+- The Pi's display stack is unknown: desktop or headless (D3), and whether the kernel
+  provides a usable framebuffer for the Waveshare panel (G1).
 - The publisher credentials on the Pi are protected only by the host key on the same
   SD card (no TPM).
 - A service stop, crash or power loss during the few seconds of a Dexcom login blocks
@@ -255,12 +267,12 @@ there means deployment hardening and "M7" hardware integration.
 - Electrical drivers, backup power, GPIO mappings, button wiring and Uno power topology
   are unselected.
 - Physical outputs and button input require reviewed wiring and explicit approval.
-- GUI and systemd installation are absent; both are planned in M5, pending approval.
+- GUI and systemd installation are absent; both are part of M5 (D1 approved).
 - `DexcomShareProvider.latest_trend` can describe a newer entry than the last valid
   reading (finding F1 in the M5 plan). Nothing reads it yet; M5 step 1 replaces it.
 - Remaining audit findings:
   - H5, the Uno power topology: hardware review before M6;
-  - M6, systemd supervision: proposed for M5 (D1);
+  - M6, systemd supervision: part of M5 (D1, approved);
   - M9, Pi platform risks: the display stack, blanking and night brightness in M5,
     under-voltage observed during the M5 Pi validation, SD-card wear open;
   - L5;
