@@ -113,15 +113,19 @@ synthetic data only. No live Dexcom request has been made. See
 - **Account:** read-only access through the publisher account. Current pydexcom and
   Nightscout clients show the API has no follower login. No account, invitation or
   follower was created or changed.
-- **Client:** HTTPS through stdlib `urllib` with certificate verification, a deadline
-  on every request, a 64 KiB body cap, refused redirects, ignored proxies and no hidden
-  retries.
+- **Client:** HTTPS through stdlib `urllib` with certificate verification, a
+  per-request deadline enforced on the socket (connect, TLS handshake, headers and
+  body; DNS resolution excepted), a 64 KiB body cap, a declared-length check, refused
+  redirects, ignored proxies and no hidden retries.
 - **Login protection,** persisted without secrets across restarts:
   - at least 300 s between login attempts;
-  - backoff on HTTP 429;
+  - backoff on HTTP 429, cleared only by a read that passes the parser;
   - a latch on rejected credentials or lockout, cleared only by an operator;
+  - a latch when a login's outcome was never recorded (crash, stop or failed write),
+    so a lost rejection is not retried after a restart;
   - a 300 s wait for the first login after a reboot.
-- **Parsing:** exact entry keys, the `WT` reading time, values from 39 (LOW) to 401
+- **Parsing:** required entry keys with additional fields ignored, the `WT` reading
+  time, values from 39 (LOW) to 401
   (HIGH) through the unchanged thresholds, and newest-wins handling of duplicates and
   out-of-order entries. The trend is kept for M5; `DexcomShareProvider.status` tells a
   blocked login apart from an outage.
@@ -129,12 +133,16 @@ synthetic data only. No live Dexcom request has been made. See
   (`share_check`) and `share_state status/unblock`.
 - **Configuration:** owner decisions `ous`, 60 s polling, 600 s maximum age, 300 s
   login interval; the rate-limit values (120 s to 1800 s) are provisional.
-- **Tests:** 157 new, 540 in total. No alarm policy, threshold, GG1, firmware or output
-  change.
+- **Tests:** 212 M4 tests, 595 in total. No alarm policy, threshold, GG1, firmware or
+  output change.
+- **Review follow-up (2026-11-13):** the first external review of PR #7, at
+  `bfb4582d`, requested changes. All five findings are resolved and the
+  resolutions are recorded in section 11 of the plan. Testing them uncovered a sixth
+  defect, now fixed: a body shorter than its `Content-Length` used to be accepted.
 
 ## Next milestone
 
-- **Review of M4** (`feat/m4-dexcom-share`).
+- **Second external review of M4** (PR #7, `feat/m4-dexcom-share`).
 - **The owner-approved read-only connectivity check** with the publisher credentials
   ([DEXCOM_SHARE.md](DEXCOM_SHARE.md)). It confirms the endpoints, the response shape,
   `WT` and `DT` agreement, and the trend format. Then a soak with outputs disabled.
@@ -161,6 +169,11 @@ synthetic data only. No live Dexcom request has been made. See
   until the connectivity check and real LOW or HIGH events confirm them.
 - The publisher credentials on the Pi are protected only by the host key on the same
   SD card (no TPM).
+- A service stop, crash or power loss during the few seconds of a Dexcom login blocks
+  automatic login (`LoginOutcomeUnknown`) until an operator unblocks. This is a
+  deliberate fail-closed choice.
+- DNS resolution cannot be interrupted by the request deadline; a slow resolver
+  delays a fetch by its own timeout.
 - Electrical drivers, backup power, GPIO mappings, button wiring and Uno power topology
   are unselected.
 - Physical outputs and button input require reviewed wiring and explicit approval.
