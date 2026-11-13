@@ -26,7 +26,9 @@ The runtime connects the alarm engine to bounded acquisition, a clock check, a
 display frame and either a transport double or the serial transport (M3). The Dexcom
 Share adapter (M4) has been tested against a synthetic simulator, and one read-only
 connectivity check against Dexcom passed on 2026-11-13; the service has not run
-continuously against Dexcom. There is no GUI and no physical output. "Simulated" below means verified with synthetic scenarios; "PC-tested" means verified
+continuously against Dexcom. The display software (M5 PR A) exists and is tested
+offline, but nothing drives a physical screen yet, and there is no physical alarm
+output. "Simulated" below means verified with synthetic scenarios; "PC-tested" means verified
 with pseudo-terminals, a Python Uno emulator, and native firmware unit tests.
 
 | Condition | Detected by | Indication | Status |
@@ -55,6 +57,13 @@ with pseudo-terminals, a Python Uno emulator, and native firmware unit tests.
 | Uno resets while connected (watchdog, brown-out, power glitch, reset button) | New boot counter, or a watchdog or brown-out cause at connection | `controller_reset` fault latched until a long press | DTR and watchdog resets detected on the USB bench (owner-reported 2026-11-12: 5 of 5 repeated resets, both watchdog hang modes). With Optiboot 4.4 only `W` (watchdog-interrupt marker) or `U` is reported; brown-out, power glitch and reset button not exercised |
 | Button held 30 s or more | Uno stuck detection | `button_stuck` fault; the stuck press acknowledges nothing | PC-tested; no button pin yet |
 | Display or transport send failure | Runtime adapter guard | Counted and logged; alarm evaluation continues | Simulated |
+| Snapshot write fails (directory missing, disk error) | `FanOutDisplay` and the runtime adapter guard | `display_errors` counted; the log display still runs; alarm evaluation and transport are unchanged; the screen turns to "NO DATA" when the snapshot expires | Offline tests (M5 PR A) |
+| Runtime stopped, crashed or stalled while the display runs | Snapshot missing, or older than `snapshot_max_age_s` by monotonic time | Screen shows "NO DATA: Glucose Guardian is not running"; no value, no trend | Offline end-to-end test (M5 PR A); 5 s provisional |
+| Snapshot corrupt, oversized, of another schema, from another source, or written in the future | Strict reader and screen model | "NO DATA: display data invalid"; no field of it is used | Offline tests (M5 PR A) |
+| Reading older than `max_age_s` | Engine (`missing_data`) and the age recomputed by the display | "LAST KNOWN" with its age, grey and without a trend; after `last_known_cutoff_s` (provisionally 30 min) the number disappears and the screen shows "NO CURRENT DATA". Alarm behavior is unchanged | Offline tests (M5 PR A) |
+| Newer reading rejected as stale or future-dated | Trend carried inside its `Reading` | The shown value keeps its own trend; no arrow outside a current reading | Offline regression tests (M5 PR A) |
+| Display process crash or render failure | Process exit (status 1); no watchdog ping after a failed render | Restart by systemd and a "Display restarting" frame are planned for PR B; not installed | Offline tests (M5 PR A) |
+| Kernel, GPU, driver, HDMI or panel freeze | Nothing automatic | The last frame, including a value, can stay on the panel; the on-screen clock stops | Residual risk (M5 plan section 3.6) |
 | Alarm-engine defect | Exception out of the loop | Service exits with status 1; heartbeats stop | Simulated; systemd restart not installed (part of M5) |
 | Pi process crash, hang or planned stop; alarm loop stalled | No new state frame on the Uno for more than 5 s (10 s grace after boot) | Uno link-lost demand, independent of the Pi | PC-tested; not observable on the bench (no output until M6) |
 | Uno firmware hang | Two-stage hardware watchdog (1 s interrupt, then 1 s reset) resets the Uno after about 2 s | `controller_reset` on the Pi (new boot counter) | Passed on the USB bench (owner-reported 2026-11-12): hangs with interrupts enabled and disabled both reset, 2.243 s between replies |
