@@ -1,7 +1,11 @@
 """Dexcom Share HTTPS client, login state machine and glucose provider."""
+import contextlib
+import functools
 import http.client
 import logging
+import socket
 import ssl
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -63,64 +67,185 @@ class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class _Deadline:
+    def __init__(self, timeout_s: float, monotonic: Callable[[], float]) -> None:
+        self._end_s = monotonic() + timeout_s
+        self._monotonic = monotonic
+        self._lock = threading.Lock()
+        self._watched: socket.socket | None = None
+        self.expired = False
+        self._timer = threading.Timer(timeout_s, self._expire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def remaining_s(self) -> float:
+        left = self._end_s - self._monotonic()
+        if self.expired or left <= 0:
+            raise TimeoutError("request deadline exceeded")
+        return left
+
+    def connect(self, host: str, port: int) -> socket.socket:
+        failure: OSError | None = None
+        for family, kind, proto, _, address in socket.getaddrinfo(host, port,
+                                                                  type=socket.SOCK_STREAM):
+            sock = socket.socket(family, kind, proto)
+            try:
+                sock.settimeout(self.remaining_s())
+                sock.connect(address)
+                self._watch(sock)
+            except OSError as error:
+                sock.close()
+                failure = error
+                continue
+            return sock
+        raise failure if failure is not None else OSError("no address to connect to")
+
+    def _watch(self, sock: socket.socket) -> None:
+        with self._lock:
+            if self.expired:
+                raise TimeoutError("request deadline exceeded")
+            if self._watched is not None:
+                self._watched.close()
+            self._watched = sock.dup()
+
+    def _expire(self) -> None:
+        with self._lock:
+            self.expired = True
+            if self._watched is not None:
+                with contextlib.suppress(OSError):
+                    self._watched.shutdown(socket.SHUT_RDWR)
+
+    def close(self) -> None:
+        self._timer.cancel()
+        self._timer.join()
+        with self._lock:
+            if self._watched is not None:
+                self._watched.close()
+                self._watched = None
+
+
+class _DeadlineConnection(http.client.HTTPConnection):
+    def __init__(self, host: str, *, timeout: float, deadline: _Deadline) -> None:
+        super().__init__(host, timeout=timeout)
+        self._deadline = deadline
+
+    def connect(self) -> None:
+        self.sock = self._deadline.connect(self.host, self.port)
+
+
+class _DeadlineTLSConnection(_DeadlineConnection):
+    default_port = http.client.HTTPS_PORT
+
+    def __init__(self, host: str, *, timeout: float, deadline: _Deadline,
+                 tls: ssl.SSLContext) -> None:
+        super().__init__(host, timeout=timeout, deadline=deadline)
+        self._tls = tls
+
+    def connect(self) -> None:
+        sock = self._deadline.connect(self.host, self.port)
+        try:
+            self.sock = self._tls.wrap_socket(sock, server_hostname=self.host)
+        except BaseException:
+            sock.close()
+            raise
+
+
+class _DeadlineHandler(urllib.request.HTTPHandler):
+    def __init__(self, deadline: _Deadline) -> None:
+        super().__init__()
+        self._deadline = deadline
+
+    def http_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(functools.partial(_DeadlineConnection, deadline=self._deadline),
+                            req)
+
+
+class _DeadlineTLSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, deadline: _Deadline, tls: ssl.SSLContext) -> None:
+        super().__init__(context=tls)
+        self._deadline = deadline
+        self._tls = tls
+
+    def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(functools.partial(_DeadlineTLSConnection, deadline=self._deadline,
+                                              tls=self._tls), req)
+
+
 def _reason(error: BaseException) -> str:
     if isinstance(error, urllib.error.URLError) and isinstance(error.reason, BaseException):
-        return type(error.reason).__name__
+        error = error.reason
+    if isinstance(error, TimeoutError):
+        return "deadline exceeded"
     return type(error).__name__
 
 
-def _read_bounded(stream: Any, headers: Any, deadline_s: float, max_bytes: int,
-                  monotonic: Callable[[], float]) -> bytes:
+def _declared_length(headers: Any) -> int | None:
     length = headers.get("Content-Length") if headers is not None else None
-    if isinstance(length, str) and length.strip().isdigit() and int(length) > max_bytes:
+    return int(length) if isinstance(length, str) and length.strip().isdigit() else None
+
+
+def _read_bounded(stream: Any, headers: Any, max_bytes: int) -> bytes:
+    declared = _declared_length(headers)
+    if declared is not None and declared > max_bytes:
         raise ShareTransportError("response too large")
     chunks: list[bytes] = []
     size = 0
     while True:
-        if monotonic() > deadline_s:
-            raise ShareTransportError("response deadline exceeded")
         try:
             chunk = stream.read(CHUNK_BYTES)
         except (OSError, http.client.HTTPException, ValueError) as error:
             raise ShareTransportError(f"response read failed: {_reason(error)}") from None
         if not chunk:
-            return b"".join(chunks)
+            break
         size += len(chunk)
         if size > max_bytes:
             raise ShareTransportError("response too large")
         chunks.append(chunk)
+    if declared is not None and size != declared:
+        raise ShareTransportError("response read failed: IncompleteRead")
+    return b"".join(chunks)
+
+
+def _exchange(opener: urllib.request.OpenerDirector, request: urllib.request.Request,
+              timeout_s: float, max_bytes: int) -> HttpResponse:
+    try:
+        response = opener.open(request, timeout=timeout_s)
+    except urllib.error.HTTPError as error:
+        response = error
+    except (OSError, http.client.HTTPException, ValueError) as error:
+        raise ShareTransportError(f"request failed: {_reason(error)}") from None
+    failed = isinstance(response, urllib.error.HTTPError)
+    status = int(response.code if failed else response.status)
+    has_body = not failed or response.fp is not None
+    try:
+        if 300 <= status < 400:
+            raise ShareTransportError("redirect refused")
+        data = _read_bounded(response, response.headers, max_bytes) if has_body else b""
+        retry_after = response.headers.get("Retry-After") if response.headers else None
+    finally:
+        if has_body:
+            response.close()
+    return HttpResponse(status, retry_after, data)
 
 
 def urllib_poster(*, context: ssl.SSLContext, user_agent: str, max_bytes: int,
                   monotonic: Callable[[], float]) -> Poster:
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
-                                         urllib.request.HTTPSHandler(context=context),
-                                         _RefuseRedirects())
     headers = {"Content-Type": "application/json", "Accept": "application/json",
                "Accept-Encoding": "identity", "User-Agent": user_agent}
 
     def post(url: str, body: bytes, timeout_s: float) -> HttpResponse:
-        deadline_s = monotonic() + timeout_s
+        deadline = _Deadline(timeout_s, monotonic)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                             _DeadlineHandler(deadline),
+                                             _DeadlineTLSHandler(deadline, context),
+                                             _RefuseRedirects())
         request = urllib.request.Request(url, data=body, method="POST", headers=headers)
         try:
-            response = opener.open(request, timeout=timeout_s)
-        except urllib.error.HTTPError as error:
-            response = error
-        except (OSError, http.client.HTTPException, ValueError) as error:
-            raise ShareTransportError(f"request failed: {_reason(error)}") from None
-        failed = isinstance(response, urllib.error.HTTPError)
-        status = int(response.code if failed else response.status)
-        has_body = not failed or response.fp is not None
-        try:
-            if 300 <= status < 400:
-                raise ShareTransportError("redirect refused")
-            data = _read_bounded(response, response.headers, deadline_s, max_bytes,
-                                 monotonic) if has_body else b""
-            retry_after = response.headers.get("Retry-After") if response.headers else None
+            return _exchange(opener, request, timeout_s, max_bytes)
         finally:
-            if has_body:
-                response.close()
-        return HttpResponse(status, retry_after, data)
+            deadline.close()
+            if deadline.expired:
+                raise ShareTransportError("request deadline exceeded") from None
 
     return post
 
@@ -139,7 +264,9 @@ class ShareSession:
         self._session_id: str | None = None
 
     def read(self, minutes: int, max_count: int) -> list[ShareEntry]:
-        return parse_entries(self.read_raw(minutes, max_count), max_count)
+        entries = parse_entries(self.read_raw(minutes, max_count), max_count)
+        self._store.succeeded()
+        return entries
 
     def read_raw(self, minutes: int, max_count: int) -> bytes:
         self._store.check_ready(self._boottime())
@@ -170,6 +297,8 @@ class ShareSession:
             self._session_id = None
             self._store.block(error.reason)
             raise
+        finally:
+            self._store.end_login()
         log.info("Dexcom Share login succeeded")
 
     def _read(self, minutes: int, max_count: int) -> bytes:
@@ -182,7 +311,6 @@ class ShareSession:
     def _call(self, url: str, body: bytes, *, authenticating: bool) -> bytes:
         response = self._post(url, body, self._timeout_s)
         if response.status == 200:
-            self._store.succeeded()
             return response.body
         error = classify_error(response.status, response.body, authenticating=authenticating,
                                retry_after=response.retry_after)
