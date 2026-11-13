@@ -8,7 +8,8 @@ from harness import build_runtime
 from share_harness import START, make_provider, synthetic
 
 from glucose_guardian.alarms import Fault, GlucoseLevel
-from glucose_guardian.dexcom_share import ShareStatus
+from glucose_guardian.dexcom_share import ShareStatus, Trend
+from glucose_guardian.display import MemoryDisplay
 from glucose_guardian.share_simulator import Fault as ServerFault
 from glucose_guardian.share_simulator import static
 from glucose_guardian.worker import Done
@@ -23,11 +24,13 @@ def synchronized() -> bool:
     return True
 
 
-def runtime_for(provider, clock, *, clock_ok: Callable[[], bool], spawn=None):
+def runtime_for(provider, clock, *, clock_ok: Callable[[], bool], spawn=None, display=None):
     parts = {"provider": provider, "wall_clock": lambda: clock.wall,
              "monotonic": lambda: clock.boottime, "clock_check": clock_ok}
     if spawn is not None:
         parts["acquisition_spawn"] = spawn
+    if display is not None:
+        parts["display"] = display
     return build_runtime(**parts)
 
 
@@ -48,7 +51,24 @@ def test_fresh_reading_reaches_the_alarm_engine(simulator, state_file, share_clo
                              request_timeout_s=2.0)
     state = runtime_for(provider, share_clock, clock_ok=synchronized).tick()
     assert (state.glucose, state.faults) == (GlucoseLevel.NORMAL, frozenset())
-    assert provider.status is ShareStatus.OK and provider.latest_trend is not None
+    assert provider.status is ShareStatus.OK
+    assert not hasattr(provider, "latest_trend")
+
+
+def test_the_trend_stays_with_the_reading_it_was_sent_with(simulator, state_file,
+                                                          share_clock):
+    simulator.source = static([synthetic(120, START, "SingleUp")])
+    provider = make_provider(simulator, state_file, share_clock, boot_id="boot-a",
+                             request_timeout_s=2.0)
+    display = MemoryDisplay()
+    runtime = runtime_for(provider, share_clock, clock_ok=synchronized, display=display)
+    assert runtime.tick().glucose_current
+    assert (display.last_frame.mg_dl, display.last_frame.trend) == (120, Trend.SINGLE_UP)
+    share_clock.advance(1300)
+    simulator.source = static([synthetic(55, START + timedelta(seconds=600), "DoubleDown")])
+    state = run_for(runtime, share_clock, 60)
+    assert not state.glucose_current and Fault.MISSING_DATA in state.faults
+    assert (display.last_frame.mg_dl, display.last_frame.trend) == (120, Trend.SINGLE_UP)
 
 
 @pytest.mark.parametrize("mg_dl,level", [(39, GlucoseLevel.URGENT_LOW),
