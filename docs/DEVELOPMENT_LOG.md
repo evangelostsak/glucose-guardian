@@ -1,5 +1,91 @@
 # Development log
 
+## 2026-11-13 — M4 live validation, roadmap correction and M5 plan
+
+Documentation and planning only. No code, configuration, firmware or test changed.
+Nothing contacted Dexcom; nothing was deployed or flashed.
+
+### M4 live validation (owner-run on the Pi, owner-reported)
+
+- **Environment:** Raspberry Pi 3 Model B, Debian 13, Python 3.13.5; region `ous`;
+  publisher credentials as encrypted systemd credentials.
+- **`make dexcom-credentials-check`:** passed.
+- **`make dexcom-check`:** authenticated, logged in and read once, with no retry. Two
+  Dexcom G7 entries, each with `DT`, `ST`, `Trend`, `Value` and `WT`. Timestamp,
+  value-format and trend checks passed; the parser accepted the response; the newest
+  reading was 42 s old.
+- **`make dexcom-status` afterwards:** `blocked: no`, last login attempt (UTC)
+  `2026-11-13T17:25:00.069100+00:00`, rate-limit backoff `None`.
+- **Outputs:** none activated; none exist.
+- **Not recorded:** glucose values, credentials, account and session identifiers.
+- **Recorded in:** PROJECT_STATUS (M4 marked complete and live-validated), section 13
+  of the M4 plan, DEXCOM_SHARE (status, a live-check column in the assumptions table,
+  the check's result), SAFETY, ARCHITECTURE and README.
+- **Still open from M4:** the LOW and HIGH encodings, session lifetime, rate-limit
+  behavior, error responses and the soak with outputs disabled. The soak is proposed
+  as part of the M5 Pi validation.
+
+### Roadmap correction
+
+- **Before (audit, 2026-11-06):** M5 Display, M6 Deployment hardening, M7 Hardware
+  integration.
+- **Now (owner, 2026-11-13):** M5 HDMI display, M6 physical siren and alarm hardware,
+  M7 bed shaker and additional hardware. The table with dependencies is in
+  PROJECT_STATUS.
+- **Deployment hardening** is no longer a milestone: runtime supervision is proposed
+  for M5 (decision D1), and persisting the retained alarm level is scheduled before
+  M6 outputs.
+- **Living documents** now use the new numbers: README, ARCHITECTURE, SAFETY, BENCH,
+  HARDWARE, DEXCOM_SHARE and PROJECT_STATUS. The M4 plan keeps its 2026-11-07 numbers
+  with a note. The audit is unchanged.
+- **Older entries in this log** keep their wording: "M6" there means deployment
+  hardening and "M7" hardware integration.
+
+### M5 inspection and plan
+
+New: [plans/2026-11-13-m5-hdmi-display.md](plans/2026-11-13-m5-hdmi-display.md),
+proposed for approval. Proposed design:
+
+- **Two processes:** the existing runtime, still the only Dexcom client, writes an
+  atomic snapshot of each display frame to `/run`. A separate display service, with
+  no network, no credentials and no Share state, renders it to the framebuffer.
+- **Rendering:** Pillow and the Linux framebuffer; pygame with SDL on KMS/DRM is the
+  fallback if the framebuffer check fails on the Pi.
+- **Screen states:** "NO DATA" when the snapshot is missing or stale, live, last known
+  and no reading. A level-colored number and a trend arrow appear only for a current
+  reading.
+
+Inspection findings:
+
+- **F1, a latent defect.** `DexcomShareProvider.latest_trend` is set for every newer
+  accepted entry, but the runtime keeps an entry as `_last_valid` only when the engine
+  finds it current. A stale or future-dated newest entry would therefore pair its
+  trend with the previous value. Nothing outside `test_share_runtime.py` reads
+  `latest_trend`, so there is no visible effect today. Not fixed here; it is step 1
+  of the plan.
+- **F2:** `DexcomShareProvider.status` keeps its previous value while a fetch hangs.
+- **F3 to F6:** no second Dexcom session; `Frame` lacks the reading time, trend,
+  source and outputs flag; the display depends on a supervised runtime (audit finding
+  M6); platform limits (audit finding M9).
+
+### Tests
+
+- **Python 3.11.18 and 3.13.18** (`make lint typecheck test` with `VENV` set to
+  scratch virtual environments): ruff clean, mypy strict clean (30 files), pytest 761
+  passed on both.
+- **The working tree's `.venv`** (Python 3.14.4) has no ruff, so `make lint` there
+  stopped with "run make setup" before running anything. That venv was left
+  unchanged.
+- **Firmware:** unchanged and not rebuilt.
+- **Links:** every relative link and anchor in the changed documents resolves.
+
+### Unresolved
+
+- Decisions D1 to D10 in section 9 of the M5 plan, chiefly runtime supervision in M5
+  (D1), the Pillow dependency (D2), the Pi image (D3), the cutoff for the last known
+  value (D6) and one shared state file for the check and the service (D9).
+- Hardware checks H1 to H12 wait for the screen.
+
 ## 2026-11-13 — PR #8 review: state-file source and credential rotation
 
 ### 1. One state file, named by `DEXCOM_CONFIG`
