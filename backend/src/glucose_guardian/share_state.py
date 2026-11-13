@@ -1,5 +1,6 @@
 """Persistent Dexcom Share login state: cooldown, rate limit and block latch. Holds no secrets."""
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -21,6 +22,7 @@ log = logging.getLogger(__name__)
 
 SCHEMA = "glucose-guardian/dexcom-share-state/1"
 UNREADABLE = "StateUnreadable"
+LOGIN_UNKNOWN = "LoginOutcomeUnknown"
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -36,13 +38,20 @@ class AuthState:
     rate_limit_backoff_s: float | None
     blocked_reason: str | None
     blocked_utc: str | None
+    login_pending: bool
 
 
 FIELDS = frozenset(AuthState.__dataclass_fields__)
 
 
 def fresh_state(boot_id: str) -> AuthState:
-    return AuthState(SCHEMA, boot_id, None, None, None, None, None, None)
+    return AuthState(SCHEMA, boot_id, None, None, None, None, None, None, False)
+
+
+def block_reason(state: AuthState) -> str | None:
+    if state.blocked_reason is None and state.login_pending:
+        return LOGIN_UNKNOWN
+    return state.blocked_reason
 
 
 def _optional(data: dict[str, object], key: str, kinds: tuple[type, ...]) -> None:
@@ -54,7 +63,7 @@ def _optional(data: dict[str, object], key: str, kinds: tuple[type, ...]) -> Non
 def parse_state(text: str) -> AuthState:
     data = json.loads(text)
     if not isinstance(data, dict) or set(data) != FIELDS or data["schema"] != SCHEMA \
-            or not isinstance(data["boot_id"], str):
+            or not isinstance(data["boot_id"], str) or not isinstance(data["login_pending"], bool):
         raise ValueError("structure")
     for key in ("last_login_boottime_s", "rate_limited_until_boottime_s",
                 "rate_limit_backoff_s"):
@@ -73,11 +82,17 @@ def read_boot_id(path: Path) -> str:
 def write_state(path: Path, state: AuthState) -> None:
     partial = path.with_name(path.name + ".partial")
     descriptor = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w") as file:
-        file.write(json.dumps(asdict(state), indent=2) + "\n")
-        file.flush()
-        os.fsync(file.fileno())
-    os.replace(partial, path)
+    try:
+        with os.fdopen(descriptor, "w") as file:
+            os.fchmod(file.fileno(), 0o600)
+            file.write(json.dumps(asdict(state), indent=2) + "\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(partial, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            partial.unlink()
+        raise
     directory = os.open(path.parent, os.O_RDONLY)
     try:
         os.fsync(directory)
@@ -108,6 +123,10 @@ class AuthStateStore:
             log.error("Dexcom Share state file is unreadable; automatic login blocked")
             return replace(fresh_state(self._boot_id), blocked_reason=UNREADABLE,
                            blocked_utc=self._utc().isoformat())
+        if block_reason(state) == LOGIN_UNKNOWN:
+            log.error("Dexcom Share login outcome was not recorded; automatic login blocked")
+            state = replace(state, blocked_reason=LOGIN_UNKNOWN,
+                            blocked_utc=self._utc().isoformat())
         if state.boot_id == self._boot_id:
             return state
         last = self._boottime() if state.last_login_utc is not None else None
@@ -143,7 +162,11 @@ class AuthStateStore:
         if last is not None and now_s - last < self._login_min_interval_s:
             raise ShareLoginDeferred("login interval not yet elapsed")
         self._save(replace(self.state, last_login_boottime_s=now_s,
-                           last_login_utc=self._utc().isoformat()))
+                           last_login_utc=self._utc().isoformat(), login_pending=True))
+
+    def end_login(self) -> None:
+        if self.state.login_pending:
+            self._save_soon(replace(self.state, login_pending=False))
 
     def rate_limited(self, now_s: float, retry_after_s: float | None) -> None:
         previous = self.state.rate_limit_backoff_s
@@ -163,7 +186,7 @@ class AuthStateStore:
     def block(self, reason: str) -> None:
         log.error("Dexcom Share automatic login blocked: %s", reason)
         self._save_soon(replace(self.state, blocked_reason=reason,
-                                blocked_utc=self._utc().isoformat()))
+                                blocked_utc=self._utc().isoformat(), login_pending=False))
 
 
 def unblock(path: Path, boot_id: str, boottime_s: float, utc: datetime) -> AuthState:
@@ -174,7 +197,7 @@ def unblock(path: Path, boot_id: str, boottime_s: float, utc: datetime) -> AuthS
     except (OSError, ValueError, TypeError, KeyError):
         state = replace(fresh_state(boot_id), last_login_boottime_s=boottime_s,
                         last_login_utc=utc.isoformat())
-    state = replace(state, blocked_reason=None, blocked_utc=None)
+    state = replace(state, blocked_reason=None, blocked_utc=None, login_pending=False)
     write_state(path, state)
     return state
 
@@ -201,8 +224,13 @@ def main(argv: list[str]) -> int:
         except (OSError, ValueError, TypeError, KeyError):
             print("state file unreadable: automatic login is blocked", file=sys.stderr)
             return EXIT_FAILED
-    blocked = "no" if state.blocked_reason is None \
-        else f"{state.blocked_reason} since {state.blocked_utc}"
+    reason = block_reason(state)
+    if reason is None:
+        blocked = "no"
+    elif state.blocked_reason is None:
+        blocked = f"{reason}: no outcome recorded for the login attempt at {state.last_login_utc}"
+    else:
+        blocked = f"{reason} since {state.blocked_utc}"
     print(f"blocked: {blocked}")
     print(f"last login attempt (UTC): {state.last_login_utc}")
     print(f"rate limit backoff (s): {state.rate_limit_backoff_s}")
