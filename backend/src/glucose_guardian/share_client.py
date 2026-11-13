@@ -27,6 +27,7 @@ from .dexcom_share import (
     ShareTransportError,
     Trend,
     authenticate_body,
+    check_request,
     classify_error,
     login_body,
     newest,
@@ -309,6 +310,7 @@ class ShareSession:
         return self._call(url, b"{}", authenticating=False)
 
     def _call(self, url: str, body: bytes, *, authenticating: bool) -> bytes:
+        check_request(self._server.base_url, url, body)
         response = self._post(url, body, self._timeout_s)
         if response.status == 200:
             return response.body
