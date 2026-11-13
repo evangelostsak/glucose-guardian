@@ -1,3 +1,4 @@
+import errno
 import ssl
 import time
 from datetime import UTC, datetime, timedelta
@@ -5,6 +6,7 @@ from pathlib import Path
 
 from harness import ROOT
 
+from glucose_guardian import share_state
 from glucose_guardian.credentials import Credentials
 from glucose_guardian.dexcom_share import APPLICATION_ID
 from glucose_guardian.share_client import (
@@ -38,6 +40,24 @@ class ShareClock:
     def advance(self, seconds: float) -> None:
         self.boottime += seconds
         self.wall += timedelta(seconds=seconds)
+
+
+class StateWrites:
+    def __init__(self, monkeypatch) -> None:
+        self.failing = False
+        self.fail_after: int | None = None
+        self.attempts = 0
+        self.failures = 0
+        real = share_state.write_state
+
+        def write(path: Path, state: share_state.AuthState) -> None:
+            self.attempts += 1
+            if self.failing or (self.fail_after is not None and self.attempts > self.fail_after):
+                self.failures += 1
+                raise OSError(errno.EIO, "synthetic state write failure")
+            real(path, state)
+
+        monkeypatch.setattr(share_state, "write_state", write)
 
 
 def synthetic(mg_dl: int, at: datetime, trend: str) -> SyntheticReading:
