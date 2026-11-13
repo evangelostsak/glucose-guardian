@@ -24,7 +24,7 @@ NIL_UUID = "00000000-0000-0000-0000-000000000000"
 UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 DATE = re.compile(r"/?Date\((\d{1,15})([+-]\d{4})?\)/?")
 CODE = re.compile(r"[A-Za-z_]{1,64}")
-ENTRY_KEYS = frozenset({"WT", "ST", "DT", "Value", "Trend"})
+REQUIRED_KEYS = frozenset({"WT", "ST", "DT", "Value", "Trend"})
 LOW_MG_DL = 39
 HIGH_MG_DL = 401
 MAX_MINUTES = 1440
@@ -180,8 +180,11 @@ def _trend(value: object) -> Trend:
 
 
 def _entry(item: object) -> ShareEntry:
-    if not isinstance(item, dict) or set(item) != ENTRY_KEYS:
-        raise ShareProtocolError("entry does not have exactly WT, ST, DT, Value and Trend")
+    if not isinstance(item, dict):
+        raise ShareProtocolError("entry is not an object")
+    missing = REQUIRED_KEYS - item.keys()
+    if missing:
+        raise ShareProtocolError(f"entry is missing {', '.join(sorted(missing))}")
     value = item["Value"]
     if isinstance(value, bool) or not isinstance(value, int) \
             or not LOW_MG_DL <= value <= HIGH_MG_DL:
@@ -198,16 +201,16 @@ def parse_entries(body: bytes, max_count: int) -> list[ShareEntry]:
         raise ShareProtocolError("glucose response is not a list")
     if len(items) > max_count:
         raise ShareProtocolError("glucose response has more entries than requested")
-    return [_entry(item) for item in items]
+    entries = [_entry(item) for item in items]
+    by_time: dict[datetime, int] = {}
+    for entry in entries:
+        if by_time.setdefault(entry.timestamp, entry.mg_dl) != entry.mg_dl:
+            raise ShareProtocolError("entries with the same timestamp disagree")
+    return entries
 
 
 def newest(entries: Sequence[ShareEntry]) -> ShareEntry | None:
-    by_time: dict[datetime, ShareEntry] = {}
-    for entry in entries:
-        seen = by_time.setdefault(entry.timestamp, entry)
-        if seen.mg_dl != entry.mg_dl:
-            raise ShareProtocolError("entries with the same timestamp disagree")
-    return by_time[max(by_time)] if by_time else None
+    return max(entries, key=lambda entry: entry.timestamp, default=None)
 
 
 def retry_after_s(header: str | None) -> float | None:
