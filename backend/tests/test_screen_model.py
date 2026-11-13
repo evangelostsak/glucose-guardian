@@ -125,11 +125,11 @@ def test_snapshot_expiry_boundary(now, state):
     shown = model(replace(LIVE, data_age_s=0), now=now)
     assert shown.state is state
     if state is ScreenState.NO_DATA:
-        assert shown.detail == "Glucose Guardian is not running"
+        assert shown.detail == "No recent display data"
 
 
 @pytest.mark.parametrize("problem,detail", [
-    (SnapshotMissing("x"), "Glucose Guardian is not running"),
+    (SnapshotMissing("x"), "No recent display data"),
     (SnapshotInvalid("x"), "Display data invalid"),
     (replace(LIVE, written_monotonic_s=NOW_MONOTONIC + 0.001), "Display data invalid"),
     (replace(LIVE, source=Source.SIMULATED, source_status=None), "Display data invalid"),
@@ -142,6 +142,48 @@ def test_no_data_shows_no_glucose(problem, detail):
     assert (shown.value, shown.trend, shown.level, shown.age, shown.connection) == (
         None, None, None, None, None)
     assert shown.display_only and shown.clock == "03:14"
+
+
+RUNTIME_CLAIMS = ("running", "stopped", "crashed", "dead", "offline")
+
+
+def texts(shown) -> list[str]:
+    values = [shown.headline, shown.detail, shown.value, shown.tag, shown.level, shown.age,
+              shown.reason, shown.connection, *shown.alerts]
+    return [value.lower() for value in values if value is not None]
+
+
+@pytest.mark.parametrize("snapshot,now", [
+    (SnapshotMissing("no file"), NOW_MONOTONIC),
+    (LIVE, LIVE.written_monotonic_s + 5.001),
+    (LIVE, LIVE.written_monotonic_s + 3600),
+    (replace(LIVE, glucose=GlucoseLevel.URGENT_LOW, mg_dl=48, trend=Trend.DOUBLE_DOWN,
+             glucose_audible=True), LIVE.written_monotonic_s + 60),
+    (replace(stale(12 * 60), source_status=ShareStatus.AUTH_BLOCKED),
+     LIVE.written_monotonic_s + 30),
+], ids=["missing", "expired-by-a-millisecond", "expired-an-hour-ago",
+        "expired-urgent-low-falling", "expired-last-known-auth-blocked"])
+def test_missing_or_expired_snapshot_shows_no_recent_data_without_claiming_a_stop(snapshot,
+                                                                                   now):
+    shown = model(snapshot, now=now)
+    assert (shown.state, shown.headline, shown.detail) == (
+        ScreenState.NO_DATA, "NO DATA", "No recent display data")
+    assert (shown.value, shown.trend, shown.tag, shown.level, shown.age, shown.reason,
+            shown.connection, shown.alerts) == (None, None, None, None, None, None, None, ())
+    assert not any(claim in text for text in texts(shown) for claim in RUNTIME_CLAIMS)
+
+
+def test_no_screen_claims_to_know_the_runtime_stopped():
+    cases = [SnapshotMissing("x"), SnapshotInvalid("x")]
+    cases += [replace(LIVE, source_status=status) for status in ShareStatus]
+    cases += [stale(age) for age in (60.0, 12 * 60, 31 * 60)]
+    for snapshot in cases:
+        for elapsed_s in (0.0, 5.0, 5.001, 600.0):
+            written = NOW_MONOTONIC if isinstance(snapshot, Exception) \
+                else snapshot.written_monotonic_s
+            shown = model(snapshot, now=written + elapsed_s)
+            assert not any(claim in text for text in texts(shown)
+                           for claim in RUNTIME_CLAIMS), shown
 
 
 def test_future_reading_within_the_skew_shows_under_a_minute():
