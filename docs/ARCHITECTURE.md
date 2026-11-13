@@ -256,30 +256,64 @@ Each request:
 - refuses redirects and ignores environment proxies;
 - is never retried.
 
-A hung request is reported as `TimedOut` and starts no new thread. DNS resolution is
-not covered by the deadline; it is bounded by the resolver, and the worker covers it.
+**Deadline enforcement.** `urllib_poster` installs its own HTTP and HTTPS connection
+classes, so the deadline covers more than each single socket operation:
+
+- **Connect:** each resolved address gets only the remaining budget, so several
+  unanswered addresses share one deadline.
+- **After connect:** a timer shuts the socket down when the deadline passes (on a
+  `dup()` of it, so the TLS socket is reached too). This ends a blocked or slow-drip
+  TLS handshake, header read or body read at the deadline, however the peer paces
+  its bytes.
+- **Reported failure:** a request that reaches its deadline fails with "request
+  deadline exceeded", even if bytes arrived meanwhile, so a body cut short by the
+  shutdown is never accepted.
+- **Declared length:** a body shorter than its `Content-Length` is a transport error.
+  `http.client` returns it silently otherwise.
+- **Timer threads:** the timer is cancelled and joined when the request ends, so no
+  thread or socket outlives it.
+
+DNS resolution (`getaddrinfo`) cannot be interrupted. A slow resolver delays the
+request by its own timeout, and the request then fails at once because the deadline
+has passed. The `BoundedWorker` still holds at most one acquisition job, so a slow
+resolver delays acquisition but starts no new thread.
 
 **Login state** (`share_state.py`), persisted in `state_file`:
 
 - **Cooldown:** at least `login_min_interval_s` between login attempts, written
-  *before* each attempt and measured on `CLOCK_BOOTTIME`.
+  *before* each attempt and measured on `CLOCK_BOOTTIME`. That write also sets
+  `login_pending`. The flag is cleared only once the attempt's outcome has been
+  recorded: success, a transport, server or protocol error, a rate limit, or a block.
+  A state file still showing `login_pending` at load means an outcome was lost, for
+  example to a crash or a failed write. Automatic login then stays blocked
+  (`LoginOutcomeUnknown`) until an operator unblocks.
 - **Rate limiting:** HTTP 429 backs off exponentially, honoring `Retry-After` in
-  seconds.
+  seconds. The backoff is cleared only by a read whose body passes `parse_entries`,
+  never by a bare HTTP 200 or a login.
 - **Latch:** rejected credentials, a lockout, a malformed login argument or a nil
   identifier block automatic login until an operator runs `share_state ... unblock`.
 - **Restarts:** a restart within the same boot keeps the cooldown, and a reboot
   restarts it from service start.
 - **Damaged or unwritable file:** an unreadable state file blocks login; an
-  unwritable one refuses every login.
+  unwritable one refuses every login, because the attempt record must be written
+  before any request. If a later write fails, the running process still keeps the
+  block or backoff in memory. After a restart:
+  - an unrecorded login outcome blocks, as above;
+  - an unrecorded backoff from a read is replaced by the persisted login interval,
+    because a restarted service has no session and must log in first.
+- **Writes:** mode 0600 (also forced on a leftover partial file), `fsync`, an atomic
+  rename and a directory `fsync`. A failed write removes the partial file and leaves
+  the previous state intact.
 
 **Parsing:**
 
-- an entry has exactly `WT`, `ST`, `DT`, `Value` and `Trend`;
+- an entry must have `WT`, `ST`, `DT`, `Value` and `Trend`; additional fields are
+  ignored and never read;
 - `WT` (UTC) is the reading time, and the receipt time is never substituted;
 - `Value` is an integer from 39 (LOW) to 401 (HIGH), classified by the unchanged
   thresholds;
 - the newest entry by timestamp wins;
-- identical duplicates collapse, and conflicting ones fail the fetch;
+- identical duplicates collapse, and conflicting ones fail the whole response;
 - older or repeated readings are not returned again, so their age grows into
   `missing_data`.
 
