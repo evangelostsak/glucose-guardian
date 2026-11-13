@@ -7,6 +7,8 @@ Status:
 - Implemented on `feat/m4-dexcom-share`. It was tested with synthetic data only; no
   live Dexcom request has been made.
 - The operator procedures are in [DEXCOM_SHARE.md](../DEXCOM_SHARE.md).
+- Revised on 2026-11-13 after the first external review of PR #7; section 11 lists
+  the findings and their resolutions.
 
 ## 1. Goal and boundaries
 
@@ -95,14 +97,17 @@ As proposed, with these approved values:
   `python -m glucose_guardian.share_state --state-file <path> unblock`.
 - **HTTP 429:** exponential backoff from `rate_limit_initial_s` to `rate_limit_max_s`.
   A `Retry-After` in seconds is honored up to the maximum. A rate-limited login still
-  counts as a login attempt.
+  counts as a login attempt. Only a read whose body passes the parser clears the
+  backoff; an HTTP 200 alone, or a successful login, does not (review finding 1).
 
 **Restart safety.** A state file, written with mode 0600, `fsync` and an atomic
 rename, holds:
 
 - the time of the last login attempt;
 - the rate-limit backoff and its end;
-- the block reason.
+- the block reason;
+- `login_pending`, set with the attempt record and cleared once the outcome is
+  recorded (review finding 4).
 
 It holds no credentials, account id or session id. Each attempt is persisted *before*
 the request is sent, so a crash during login still counts. Over restarts:
@@ -114,6 +119,14 @@ the request is sent, so a crash during login still counts. Over restarts:
   startup delay after a reboot; the startup missing-data fault is active then anyway.
 - **Unreadable state file:** automatic login is blocked until an operator unblocks it.
 - **Unwritable state file:** every login is refused, before any request is sent.
+- **Unrecorded login outcome:** if `login_pending` is still set at load, the outcome
+  of the last login was lost: a crash, a stop or power loss during the login, or a
+  failed write of the block. Automatic login is blocked (`LoginOutcomeUnknown`) until
+  an operator unblocks it. This trades availability for account safety: a stop during
+  the few seconds of a login also needs an unblock.
+- **Unwritten 429 backoff from a read:** the running process keeps it. After a
+  restart, the persisted login interval bounds the first request instead, because a
+  restarted service must log in before it can read.
 
 ## 5. Readings and freshness
 
@@ -124,14 +137,16 @@ As proposed, plus:
 - **Timestamp:** `WT` (UTC epoch milliseconds) is the reading time, as in Nightscout.
   `ST` and `DT` must parse but are not used; the connectivity check reports their
   offsets from `WT`. The receipt time is never used.
-- **Strict entries:** exactly `WT`, `ST`, `DT`, `Value`, `Trend`. `Value` must be an
-  integer from 39 to 401, which takes in LOW 39 and HIGH 401. Unknown keys, trends or
-  value encodings fail the fetch as a protocol error, which shows as an acquisition
-  fault. 39 and 401 reach the engine unchanged and classify through the existing
-  thresholds.
+- **Strict entries:** `WT`, `ST`, `DT`, `Value` and `Trend` are required.
+  Additional fields are ignored and never read; before the review, any extra field
+  failed the fetch (review finding 3). `Value` must be an integer from 39 to 401,
+  which takes in LOW 39 and HIGH 401. A missing required field, an unknown trend or
+  another value encoding fails the fetch as a protocol error, which shows as an
+  acquisition fault. 39 and 401 reach the engine unchanged and classify through the
+  existing thresholds.
 - **Choosing the reading:** the newest entry by timestamp wins regardless of order.
   Identical duplicates collapse; entries with the same timestamp and different values
-  fail the fetch. A reading older than, or equal to, the previous one is not returned
+  fail the whole response in the parser. A reading older than, or equal to, the previous one is not returned
   again, so its age keeps growing toward `missing_data`.
 - **Trend:** parsed into `Trend` and kept as `DexcomShareProvider.latest_trend` for M5.
   No alarm uses it.
@@ -202,3 +217,17 @@ Risks:
 - **Credentials on the Pi:** see DEXCOM_SHARE.md.
 - **Clock:** freshness depends on a synchronized clock, which the systemd clock check
   enforces.
+
+## 11. Review of PR #7 (2026-11-13)
+
+The external review at `bfb4582d` requested changes. Each finding was checked against
+the code first; tests run on the code under review showed the defect where there was
+one.
+
+| # | Finding | Verified defect | Resolution |
+|---|---|---|---|
+| 1 | `_call` cleared the rate-limit state on any HTTP 200 | Yes. A malformed or invalid 200 reset the backoff, so the next 429 restarted at 120 s instead of doubling. The login cooldown and latch were not affected | `ShareSession.read` clears the backoff only after `parse_entries` accepts the body. The parser now also rejects conflicting duplicates. Logins never clear it |
+| 2 | The deadline was checked only between blocking reads | Yes. Slow-drip headers or bodies held a 0.5 s request until the test drip stopped after 3 s; an endless drip would have held it indefinitely, with the worker blocked but no second thread. Three unanswered addresses took 1.5 s. A body shorter than its `Content-Length` was accepted (found while testing) | Per-request deadline on the socket: remaining budget per connect, and a timer that shuts the socket down at the deadline. Declared-length check. DNS stays outside, documented |
+| 3 | Entries had to have exactly five keys | Brittle by design | Required keys are enforced and additional fields ignored. Value and timestamp validation are unchanged |
+| 4 | Persistence failures | Yes. A block that could not be written was forgotten at restart, and the service logged in again after 300 s. A stale partial file could make the state file mode 0644, and a failed rename left the partial file behind | `login_pending` marker with `LoginOutcomeUnknown` latch. `fchmod` 0600 and cleanup of the partial file on failure |
+| 5 | README said no Uno had been flashed | Yes | README states the M3 bench result and what remains unvalidated |
