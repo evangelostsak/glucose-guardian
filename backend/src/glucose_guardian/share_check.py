@@ -10,10 +10,10 @@ from .config import ConfigError, load_config
 from .credentials import CredentialsError
 from .dexcom_share import (
     DATE,
-    ENTRY_KEYS,
     HIGH_MG_DL,
     LEGACY_TRENDS,
     LOW_MG_DL,
+    REQUIRED_KEYS,
     ShareError,
     Trend,
     parse_entries,
@@ -53,8 +53,10 @@ def _entry(index: int, item: dict[str, object], now: datetime) -> list[str]:
     keys = sorted(item)
     types = ", ".join(f"{key}={type(item[key]).__name__}" for key in keys)
     lines = [f"entry {index}: keys {keys}; types {types}"]
-    if set(item) != ENTRY_KEYS:
-        lines.append(f"entry {index}: key set differs from {sorted(ENTRY_KEYS)}")
+    missing = sorted(REQUIRED_KEYS - item.keys())
+    if missing:
+        lines.append(f"entry {index}: missing required keys {missing}")
+    lines.append(f"entry {index}: additional keys ignored: {len(item.keys() - REQUIRED_KEYS)}")
     instants = {key: _instant(item[key]) if key in item else None for key in ("WT", "ST", "DT")}
     wall = instants["WT"]
     if wall is not None:
