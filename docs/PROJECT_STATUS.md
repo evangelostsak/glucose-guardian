@@ -145,6 +145,29 @@ synthetic data only. No live Dexcom request has been made. See
   resolutions are recorded in section 11 of the plan. Testing them uncovered a sixth
   defect, now fixed: a body shorter than its `Content-Length` used to be accepted.
 
+**Root Makefile** (`feat/root-makefile`). A `Makefile` at the repository root is the
+entry point for development, CI, firmware, the bench, the Raspberry Pi and Dexcom
+Share diagnostics. `make help` is the default target.
+
+- **Delegation:** the bench and flash targets call `bench/Makefile`, and the Dexcom
+  targets follow `DEXCOM_SHARE.md`. No application logic was duplicated.
+- **Firmware:** `firmware-flash` is the only target that writes firmware. It needs
+  `SERIAL_PORT`, `VARIANT` and a typed `flash <variant>`.
+- **Dexcom:** `dexcom-check` is the only target that contacts Dexcom. It needs a
+  terminal and a typed `contact dexcom`, and never retries. `dexcom-credentials`
+  encrypts from a hidden prompt; credentials never pass through arguments, variables
+  or the environment.
+- **State file:** `dexcom-status`, the `dexcom-check` preflight and `share_check` read
+  the path named in `DEXCOM_CONFIG`. An explicit `STATE_DIR` that disagrees is
+  refused.
+- **Credential rotation:** `dexcom-credentials-rotate CREDENTIAL=username|password`
+  replaces a credential only after a typed confirmation, the same value entered twice,
+  encryption and validation through systemd. Until then the current file stays.
+  `dexcom-credentials-check` validates the provisioned pair.
+- **CI:** now runs the same targets: `make setup lint typecheck test` and
+  `make setup-firmware firmware-build firmware-test`.
+- **Tests:** 88 Makefile tests; 761 in total.
+
 ## Next milestone
 
 - **Second external review of M4** (PR #7, `feat/m4-dexcom-share`).

@@ -47,6 +47,27 @@ fails `firmware.identity` and stops.
 
 ## Workflow
 
+The root `Makefile` wraps this workflow; its bench and flash targets call
+`bench/Makefile` and add nothing to its checks except a typed confirmation before
+`firmware-flash`:
+
+| Root target | Runs | Where |
+|---|---|---|
+| `make firmware-build` | `make -C bench build` | laptop |
+| `make pi-sync PI_USER=... PI_HOST=...` | copies the tree, with `bench/out`, to `~/glucose-guardian` | laptop |
+| `make bench-setup` (or `make pi-setup` from the laptop) | `make -C bench setup` | Pi |
+| `make bench-discover` | `make -C bench discover` | Pi |
+| `make firmware-flash SERIAL_PORT=... VARIANT=production` | `make -C bench flash`, after typing `flash production` | Pi |
+| `make bench-run SERIAL_PORT=...`, `make bench-run-interactive SERIAL_PORT=...` | `make -C bench run`, `run-interactive` | Pi |
+| `make bench-bootloader SERIAL_PORT=...` | `make -C bench bootloader` | Pi |
+| `make firmware-flash SERIAL_PORT=... VARIANT=watchdog-test CONFIRM=watchdog-test` | `make -C bench flash`, after typing `flash watchdog-test` | Pi |
+| `make bench-watchdog SERIAL_PORT=...` | `make -C bench watchdog` | Pi |
+| `make bench-collect` | `make -C bench collect` | Pi |
+
+The root targets use one virtual environment, `.venv` at the root of the copied tree.
+The commands below use `bench/Makefile` directly with its own `bench/.venv` in
+`~/glucose-guardian-bench`; both work.
+
 On the laptop (PlatformIO 6.1.18 installed):
 
 ```sh

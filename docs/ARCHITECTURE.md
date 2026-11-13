@@ -23,8 +23,8 @@ process (M6); the supplied unit is an uninstalled template.
 | `service.py` | Runtime entry point with simulated or Dexcom Share acquisition |
 | `dexcom_share.py` | Dexcom Share protocol: endpoints, request bodies, strict parsing, error classes; no I/O |
 | `share_client.py` | `urllib` HTTPS poster, login state machine (`ShareSession`), `DexcomShareProvider` |
-| `share_state.py` | Persisted login cooldown, rate limit and block latch; `status`/`unblock` commands; no secrets |
-| `credentials.py` | Publisher credentials from `$CREDENTIALS_DIRECTORY` |
+| `share_state.py` | Persisted login cooldown, rate limit and block latch; `status`/`unblock`/`path` commands on `--state-file` or `--config`; no secrets |
+| `credentials.py` | Publisher credentials from `$CREDENTIALS_DIRECTORY`; `python -m glucose_guardian.credentials` validates them without printing values |
 | `share_simulator.py` | Local synthetic Dexcom Share server (tests, soak runs) |
 | `share_check.py` | Read-only connectivity check that prints structure, never values |
 

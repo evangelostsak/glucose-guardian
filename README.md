@@ -10,34 +10,46 @@ require dedicated driver circuitry and backup power, which have not been selecte
 
 ## Development
 
-```sh
-python3 -m venv .venv
-.venv/bin/python -m pip install -e './backend[test,lint]'
-cd backend
-../.venv/bin/python -m ruff check src tests
-../.venv/bin/python -m mypy src
-../.venv/bin/python -m pytest
-../.venv/bin/python -m glucose_guardian
-cp ../config/example.toml ../config/local.toml
-../.venv/bin/python -m glucose_guardian.service --config ../config/local.toml
-```
-
-The demo prints four synthetic readings and exits. The service runs the simulated
-runtime with the scenario named in `[simulation]` until SIGTERM or Ctrl+C; it logs
-alarm and fault changes, never glucose values. Neither drives outputs. The service
-reads Dexcom Share only with `provider = "dexcom_share"` and systemd-provided
-credentials (see [docs/DEXCOM_SHARE.md](docs/DEXCOM_SHARE.md)), and opens a serial port
-only when `[transport] kind = "serial"` is configured. `config/local.toml` is git-ignored. All example thresholds are
-synthetic test values, not clinical recommendations.
+The root `Makefile` is the entry point. `make` lists every target, where it runs
+(laptop or Pi) and the variables it reads. The laptop needs Python 3.11 or newer and
+GNU make.
 
 ```sh
-python3 -m pip install platformio==6.1.18
-pio run --project-dir firmware/arduino-uno -e uno
-pio test --project-dir firmware/arduino-uno -e native
+make setup
+make setup-firmware
+make check
+make simulate
 ```
 
-CI runs ruff, mypy and pytest on Python 3.11 and 3.13, compiles the Uno firmware, and
-runs the firmware unit tests natively. CI runs no hardware test.
+| Target | What it does |
+|---|---|
+| `make setup` | Creates `.venv` and installs the backend with its test and lint tools |
+| `make setup-firmware` | Installs the pinned PlatformIO (6.1.18) into `.venv` |
+| `make lint`, `make typecheck`, `make test` | Ruff, strict mypy and pytest on the backend |
+| `make firmware-build`, `make firmware-test` | Compiles both Uno images into `bench/out` (no upload) and runs the native firmware tests |
+| `make check` | Everything CI runs |
+| `make simulate` | Runs the simulated runtime from `CONFIG` (default `config/example.toml`) until Ctrl+C |
+| `make simulator` | Runs the synthetic Dexcom Share server on `127.0.0.1:8765` |
+
+The service logs alarm and fault changes, never glucose values, and drives no outputs.
+`make simulate` withholds systemd credentials, so it can never reach Dexcom. The
+service reads Dexcom Share only with `provider = "dexcom_share"` and systemd-provided
+credentials (see [docs/DEXCOM_SHARE.md](docs/DEXCOM_SHARE.md)). It opens a serial port
+only when `[transport] kind = "serial"` is configured. `python -m glucose_guardian`
+prints four synthetic readings and exits. `config/local.*` is Git-ignored. All example
+thresholds are synthetic test values, not clinical recommendations.
+
+On the Raspberry Pi, the bench and Dexcom targets run in the tree that `make pi-sync
+PI_USER=... PI_HOST=...` copies to `~/glucose-guardian`. See
+[docs/BENCH.md](docs/BENCH.md) and [docs/DEXCOM_SHARE.md](docs/DEXCOM_SHARE.md).
+These two targets ask for a typed confirmation and never run as part of another
+target:
+
+- `make firmware-flash`, the only target that writes firmware;
+- `make dexcom-check`, the only target that contacts Dexcom.
+
+CI runs `make lint typecheck test` on Python 3.11 and 3.13 and `make firmware-build
+firmware-test`. CI runs no hardware test and never contacts Dexcom.
 
 ## Layout
 
@@ -48,6 +60,8 @@ runs the firmware unit tests natively. CI runs no hardware test.
   button classification and watchdog; no pins assigned and outputs disabled.
 - `config/example.toml`, `config/example-dexcom-share.toml`: secret-free example
   settings (simulated and Dexcom Share acquisition).
+- `Makefile`: root entry point for development, CI, firmware, bench, Pi and Dexcom
+  targets (`make help`).
 - `bench/`: Makefile for the USB-only Uno bench (build, deploy, flash, run, collect);
   see [docs/BENCH.md](docs/BENCH.md).
 - `deployment/systemd/`: inactive, uninstalled service template (M6).

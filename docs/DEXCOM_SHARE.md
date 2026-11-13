@@ -129,6 +129,13 @@ here deploys the service.
    sudo chmod 0600 /etc/glucose-guardian/credentials/*.cred
    ```
 
+   On the Pi, `make dexcom-credentials` runs the same commands. It encrypts each file
+   under a temporary name and renames it when encryption succeeds, so a cancelled
+   prompt leaves nothing behind. It keeps an existing file; replace one with
+   `make dexcom-credentials-rotate` (see *Rotating credentials*), never by deleting it
+   first. `make dexcom-credentials-check` decrypts both files through systemd and
+   checks their format without contacting Dexcom.
+
 2. Reference them in the unit, as `deployment/systemd/glucose-guardian.service` shows:
    `LoadCredentialEncrypted=` for both names, `StateDirectory=glucose-guardian` and
    `StateDirectoryMode=0700`.
@@ -140,11 +147,36 @@ the service user can read. The plaintext never touches the SD card.
 
 1. Change the password through Dexcom (the G7 app or Dexcom's account site), never
    from the Pi.
-2. Stop the service, re-encrypt the changed credential (step 1 above), check the state
-   with `python -m glucose_guardian.share_state --state-file <state_file> status`, and
-   start the service.
-3. If the service ran with the old password after the change, it has latched
-   `AccountPasswordInvalid` and stopped logging in. Follow the recovery below.
+2. Stop the service if it is installed (M6). On the Pi, in `~/glucose-guardian`, replace
+   the changed credential:
+
+   ```sh
+   make dexcom-credentials-rotate CREDENTIAL=password
+   make dexcom-credentials-check
+   make dexcom-status
+   ```
+
+   `dexcom-credentials-rotate` (`CREDENTIAL=username` for the user name) works as
+   follows:
+
+   - **Confirmation:** it asks for `replace dexcom-password` to be typed exactly.
+   - **Entry:** it reads the new value twice from hidden `systemd-ask-password`
+     prompts and stops if the two differ.
+   - **Encryption:** it pipes the value into `systemd-creds encrypt` as a temporary
+     `.cred.new` file.
+   - **Validation:** it loads that file, with the other current credential, through
+     `systemd-run` with `LoadCredentialEncrypted=` (the mechanism the check uses) and
+     `python -m glucose_guardian.credentials`. That decrypts both and checks their
+     format. It does not contact Dexcom, so a wrong but well-formed password is only
+     found at the next login.
+   - **Swap:** only then does it rename the temporary file over the current one.
+   - **On failure:** if the entries differ, encryption fails or validation fails, the
+     current file is unchanged and the temporary file is removed.
+   - **Exposure:** the value never appears in arguments, the environment or logs.
+
+3. If `dexcom-status` shows `AccountPasswordInvalid`, the old password was used after
+   the change and automatic login is blocked. Follow the recovery below, then start
+   the service.
 
 ## Recovering from a blocked login
 
@@ -165,9 +197,9 @@ login requests, across restarts too.
      could not be written (look for `Dexcom Share state could not be written` in the
      log). Check that the state directory is writable and that the official app
      still logs in; the credentials may have been rejected.
-2. Stop the service, run `python -m glucose_guardian.share_state --state-file
-   <state_file> unblock`, then start the service. The login interval still applies
-   after unblocking.
+2. Stop the service, run `python -m glucose_guardian.share_state --config
+   config/local.dexcom.toml unblock` (or `--state-file <state_file>`), then start the
+   service. The login interval still applies after unblocking.
 3. Never unblock repeatedly without fixing the cause: every attempt counts toward
    Dexcom's lockout.
 
@@ -204,41 +236,58 @@ login) and one read.
 It uses the same state file, login interval, latch and request allowlist as the
 service, so it can send nothing but the authenticate, login and read operations.
 
-1. On the laptop, from the reviewed branch, copy the code to the Pi:
+The root `Makefile` runs every step; `make -n <target>` prints a target's exact
+commands without running them.
+
+1. On the laptop, from an up-to-date `main`, copy the tree to the Pi and install it
+   there:
 
    ```sh
-   rsync -a --exclude .venv --exclude __pycache__ --exclude '*.egg-info' backend config <user>@<pi-host>:glucose-guardian-m4/
+   make pi-sync PI_USER=<user> PI_HOST=<pi-host>
+   make pi-setup PI_USER=<user> PI_HOST=<pi-host>
    ```
 
-2. On the Pi, install it into a virtual environment:
+   `pi-sync` copies the repository (without `.venv`, `config/local.*` or bench reports)
+   to `~/glucose-guardian`. `pi-setup` runs `make bench-setup` there over SSH. That
+   installs `python3-venv`, `avrdude` and `usbutils`, creates `.venv`, installs the
+   backend, and asks for the Pi user's `sudo` password.
+
+2. On the Pi, in `~/glucose-guardian`, provision and check:
 
    ```sh
-   cd ~/glucose-guardian-m4
-   python3 -m venv .venv
-   .venv/bin/python -m pip install -e backend
+   make dexcom-credentials
+   make dexcom-credentials-check
+   make dexcom-config
+   make status
+   make dexcom-status
    ```
 
-3. Encrypt the credentials as in step 1 of *Provisioning credentials*.
+   - **`dexcom-credentials`:** encrypts both credentials, typed at a hidden prompt, as
+     in *Provisioning credentials*.
+   - **`dexcom-credentials-check`:** must report that both decrypt and are well-formed.
+   - **`dexcom-config`:** creates `~/glucose-guardian-state` (mode 0700) and the
+     Git-ignored `config/local.dexcom.toml` pointing at it.
+   - **The state file:** it always comes from `DEXCOM_CONFIG`.
+     - `dexcom-status`, the `dexcom-check` preflight and `share_check` all read the
+       path named there.
+     - An explicit `STATE_DIR` that disagrees with an existing configuration is
+       refused, not silently used.
+   - **`status`:** must show `clock synchronized: yes`, the virtual environment, the
+     Dexcom configuration and `dexcom credentials: provisioned`.
+   - **`dexcom-status`:** must show `blocked: no`, or that no state file exists yet.
 
-4. Create a state directory and a local configuration (`config/local.*` is ignored by
-   Git):
+3. Run the check once:
 
    ```sh
-   install -d -m 0700 ~/glucose-guardian-state
-   sed "s|/var/lib/glucose-guardian|$HOME/glucose-guardian-state|" config/example-dexcom-share.toml > config/local.dexcom.toml
+   make dexcom-check
    ```
 
-5. Run the check once:
+   It shows the login state and says which three requests it will send. It sends
+   nothing unless `contact dexcom` is typed exactly. It then runs `share_check` once
+   under `sudo systemd-run --pipe --wait`, with `LoadCredentialEncrypted=` for both
+   credentials, and never retries.
 
-   ```sh
-   sudo systemd-run --pipe --wait --uid="$(id -u)" --gid="$(id -g)" \
-     -p LoadCredentialEncrypted=dexcom-username:/etc/glucose-guardian/credentials/dexcom-username.cred \
-     -p LoadCredentialEncrypted=dexcom-password:/etc/glucose-guardian/credentials/dexcom-password.cred \
-     -p WorkingDirectory="$PWD" \
-     "$PWD/.venv/bin/python" -m glucose_guardian.share_check --config "$PWD/config/local.dexcom.toml"
-   ```
-
-6. Send back the complete output; it contains no values or secrets. Expected for a
+4. Send back the complete output; it contains no values or secrets. Expected for a
    healthy account:
    - `Dexcom Share responded`;
    - `entries:` 1 to 3, each with keys that include `DT`, `ST`, `Trend`, `Value` and
@@ -249,7 +298,7 @@ service, so it can send nothing but the authenticate, login and read operations.
    - small `ST minus WT` and `DT minus WT` offsets;
    - `DT offset +0100` or `+0200`;
    - `parser: accepted`.
-7. **On failure, do not retry.**
+5. **On failure, do not retry.**
    - `auth_blocked`: follow the recovery above.
    - Anything else: send the output for analysis.
 

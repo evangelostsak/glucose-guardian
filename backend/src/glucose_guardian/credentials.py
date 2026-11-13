@@ -1,5 +1,7 @@
 """Dexcom Share publisher credentials from a systemd credentials directory. Never printed."""
+import os
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -7,6 +9,8 @@ USERNAME_FILE = "dexcom-username"
 PASSWORD_FILE = "dexcom-password"
 MAX_BYTES = 256
 FORBIDDEN = frozenset("\r\n\x00")
+EXIT_OK = 0
+EXIT_FAILED = 1
 
 
 class CredentialsError(Exception):
@@ -55,3 +59,17 @@ def load_credentials(directory: str | None) -> Credentials:
             "through systemd LoadCredentialEncrypted= (see docs/DEXCOM_SHARE.md)")
     return Credentials(_read(Path(directory), USERNAME_FILE),
                        _read(Path(directory), PASSWORD_FILE))
+
+
+def main() -> int:
+    try:
+        load_credentials(os.environ.get("CREDENTIALS_DIRECTORY"))
+    except CredentialsError as error:
+        print(f"credentials invalid: {error}", file=sys.stderr)
+        return EXIT_FAILED
+    print("credentials: both decrypt and are well-formed (Dexcom was not contacted)")
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

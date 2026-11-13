@@ -2,6 +2,7 @@ import os
 
 import pytest
 
+from glucose_guardian import credentials
 from glucose_guardian.credentials import (
     PASSWORD_FILE,
     USERNAME_FILE,
@@ -75,3 +76,32 @@ def test_values_never_appear_in_text(directory):
     with pytest.raises(CredentialsError) as error:
         load_credentials(str(directory))
     assert PASSWORD not in str(error.value) and USERNAME not in str(error.value)
+
+
+def test_validator_command_reports_validity_without_values(directory, monkeypatch, capsys):
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(directory))
+    assert credentials.main() == credentials.EXIT_OK
+    output = capsys.readouterr().out
+    assert "well-formed" in output and "Dexcom was not contacted" in output
+    assert USERNAME not in output and PASSWORD not in output
+
+
+@pytest.mark.parametrize("content,mode,message", [
+    (b"two\nlines\n", 0o400, "must be one non-empty line"),
+    (b"x" * 300, 0o400, "1 to 256 bytes"),
+    (PASSWORD.encode(), 0o404, "other users"),
+])
+def test_validator_command_rejects_malformed_credentials(directory, monkeypatch, capsys,
+                                                         content, mode, message):
+    write(directory, PASSWORD_FILE, content, mode)
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(directory))
+    assert credentials.main() == credentials.EXIT_FAILED
+    error = capsys.readouterr().err
+    assert message in error
+    assert USERNAME not in error and PASSWORD not in error and "two" not in error
+
+
+def test_validator_command_without_systemd_credentials_fails(monkeypatch, capsys):
+    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+    assert credentials.main() == credentials.EXIT_FAILED
+    assert "CREDENTIALS_DIRECTORY is not set" in capsys.readouterr().err

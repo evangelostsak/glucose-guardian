@@ -9,18 +9,13 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ['3.11', '3.13']
-    defaults:
-      run:
-        working-directory: backend
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python -m pip install -e '.[test,lint]'
-      - run: python -m ruff check src tests
-      - run: python -m mypy src
-      - run: python -m pytest
+      - run: make setup PYTHON=python
+      - run: make lint typecheck test
   firmware:
     runs-on: ubuntu-latest
     steps:
@@ -28,7 +23,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: python -m pip install platformio==6.1.18
-      - run: pio run --project-dir firmware/arduino-uno -e uno
-      - run: pio run --project-dir firmware/arduino-uno -e uno-watchdog-test
-      - run: pio test --project-dir firmware/arduino-uno -e native
+      - run: make setup-firmware PYTHON=python
+      - run: make firmware-build firmware-test

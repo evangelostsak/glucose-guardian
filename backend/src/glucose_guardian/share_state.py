@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .config import ConfigError, load_config
 from .dexcom_share import (
     ShareAuthBlocked,
     ShareLoginDeferred,
@@ -26,6 +27,7 @@ LOGIN_UNKNOWN = "LoginOutcomeUnknown"
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 EXIT_OK = 0
 EXIT_FAILED = 1
+EXIT_CONFIG = 2
 
 
 @dataclass(frozen=True)
@@ -202,14 +204,35 @@ def unblock(path: Path, boot_id: str, boottime_s: float, utc: datetime) -> AuthS
     return state
 
 
+def state_file_of(config_path: Path) -> Path:
+    settings = load_config(config_path).dexcom
+    if settings is None:
+        raise ConfigError(f"{config_path}: provider must be dexcom_share")
+    return settings.state_file
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="python -m glucose_guardian.share_state")
-    parser.add_argument("--state-file", required=True, type=Path)
-    parser.add_argument("command", choices=("status", "unblock"))
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--state-file", type=Path)
+    source.add_argument("--config", type=Path)
+    parser.add_argument("command", choices=("status", "unblock", "path"))
     args = parser.parse_args(argv)
+    if args.config is None:
+        state_file: Path = args.state_file
+    else:
+        try:
+            state_file = state_file_of(args.config)
+        except ConfigError as error:
+            print(f"configuration error: {error}", file=sys.stderr)
+            return EXIT_CONFIG
+    if args.command == "path":
+        print(state_file)
+        return EXIT_OK
+    print(f"state file: {state_file}")
     if args.command == "unblock":
         try:
-            state = unblock(args.state_file, read_boot_id(BOOT_ID),
+            state = unblock(state_file, read_boot_id(BOOT_ID),
                             time.clock_gettime(time.CLOCK_BOOTTIME), datetime.now(UTC))
         except OSError as error:
             print(f"unblock failed: {type(error).__name__}", file=sys.stderr)
@@ -217,7 +240,7 @@ def main(argv: list[str]) -> int:
         print("automatic login unblocked; the login interval still applies")
     else:
         try:
-            state = parse_state(args.state_file.read_text())
+            state = parse_state(state_file.read_text())
         except FileNotFoundError:
             print("no state file: no login has been attempted")
             return EXIT_OK

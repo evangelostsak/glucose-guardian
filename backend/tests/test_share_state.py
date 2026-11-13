@@ -2,8 +2,10 @@ import json
 import os
 import stat
 from dataclasses import asdict
+from pathlib import Path
 
 import pytest
+from harness import EXAMPLE, ROOT
 from share_harness import START, ShareClock, StateWrites, make_store
 
 from glucose_guardian import share_state
@@ -320,3 +322,38 @@ def test_a_single_write_is_private_even_over_a_stale_partial_file(path, share_cl
         unblock(path, "boot-a", share_clock.boottime, share_clock.wall)
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert not partial.exists()
+
+
+def dexcom_config(tmp_path, state_dir):
+    example = (ROOT / "config" / "example-dexcom-share.toml").read_text()
+    config = tmp_path / "local.dexcom.toml"
+    config.write_text(example.replace("/var/lib/glucose-guardian", str(state_dir)))
+    return config
+
+
+def test_cli_resolves_the_state_file_from_the_dexcom_config(tmp_path, share_clock, capsys):
+    state_dir = tmp_path / "configured"
+    state_dir.mkdir()
+    config = dexcom_config(tmp_path, state_dir)
+    state_file = state_dir / "dexcom-share-state.json"
+    assert share_state.main(["--config", str(config), "path"]) == share_state.EXIT_OK
+    assert capsys.readouterr().out == f"{state_file}\n"
+    make_store(state_file, share_clock, "boot-a").block("AccountPasswordInvalid")
+    assert share_state.main(["--config", str(config), "status"]) == share_state.EXIT_OK
+    output = capsys.readouterr().out
+    assert output.startswith(f"state file: {state_file}\n")
+    assert "blocked: AccountPasswordInvalid since" in output
+
+
+@pytest.mark.parametrize("config", [EXAMPLE, Path("/nonexistent/local.dexcom.toml")])
+def test_cli_refuses_a_config_without_dexcom_settings(config, capsys):
+    assert share_state.main(["--config", str(config), "path"]) == share_state.EXIT_CONFIG
+    assert "configuration error" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("arguments", [["status"], ["--state-file", "a", "--config", "b",
+                                                      "status"]])
+def test_cli_needs_exactly_one_state_source(arguments):
+    with pytest.raises(SystemExit) as stopped:
+        share_state.main(arguments)
+    assert stopped.value.code == 2
