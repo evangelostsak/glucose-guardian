@@ -7,7 +7,8 @@ from datetime import datetime
 
 from .alarms import AlarmMachine, Fault, Policy, State
 from .config import RuntimeSettings
-from .display import Display, Frame, build_frame
+from .dexcom_share import ShareStatus
+from .display import Display, Source, build_frame
 from .providers import GlucoseProvider, Reading
 from .transport import LINK_DOWN, AlarmTransport, Inbound
 from .worker import BoundedWorker, Done, Spawn, TimedOut
@@ -19,7 +20,9 @@ class Runtime:
     def __init__(self, *, policy: Policy, settings: RuntimeSettings, provider: GlucoseProvider,
                  clock_check: Callable[[], bool], transport: AlarmTransport, display: Display,
                  wall_clock: Callable[[], datetime], monotonic: Callable[[], float],
-                 acquisition_spawn: Spawn, clock_spawn: Spawn) -> None:
+                 acquisition_spawn: Spawn, clock_spawn: Spawn, source: Source,
+                 source_status: Callable[[], ShareStatus | None],
+                 outputs_enabled: bool) -> None:
         self.machine = AlarmMachine(policy)
         self.counts: Counter[str] = Counter()
         self._tick_s = settings.tick_s
@@ -27,6 +30,9 @@ class Runtime:
         self._clock_check = clock_check
         self._transport = transport
         self._display = display
+        self._source = source
+        self._source_status = source_status
+        self._outputs_enabled = outputs_enabled
         self._wall_clock = wall_clock
         self._monotonic = monotonic
         self.acquisition: BoundedWorker[Reading | None] = BoundedWorker(
@@ -76,7 +82,7 @@ class Runtime:
         if state.glucose_current:
             self._last_valid = self._latest
         self._send(state, monotonic_s)
-        self._render(build_frame(state, self._last_valid, now))
+        self._render(state, now)
         return state
 
     def _poll_acquisition(self, now: datetime, monotonic_s: float) -> None:
@@ -124,9 +130,11 @@ class Runtime:
         except Exception as error:
             self._adapter_error("transport", error)
 
-    def _render(self, frame: Frame) -> None:
+    def _render(self, state: State, now: datetime) -> None:
         try:
-            self._display.render(frame)
+            self._display.render(build_frame(
+                state, self._last_valid, now, source=self._source,
+                source_status=self._source_status(), outputs_enabled=self._outputs_enabled))
         except Exception as error:
             self._adapter_error("display", error)
 
