@@ -1,13 +1,13 @@
 # Project status
 
-Updated: 2026-11-12
+Updated: 2026-11-13
 
 ## Current implementation
 
 `main` holds the initial scaffold and repository audit (PR #1), M0 housekeeping
 (PR #2), M1 alarm policy v2 (PR #3), M2 simulated end-to-end runtime (PR #4), M3
-serial protocol v1 (PR #5), and the USB bench tooling with its hardware validation
-(PR #6). CI
+serial protocol v1 (PR #5), the USB bench tooling with its hardware validation
+(PR #6), M4 Dexcom Share acquisition (PR #7) and the root Makefile (PR #8). CI
 runs ruff, strict mypy and pytest on Python 3.11 and 3.13 plus the Uno build. `main` is
 protected and requires one approving review; status checks are deliberately not
 required.
@@ -105,10 +105,29 @@ The physical alarm system is not validated. NOT TESTED on this bench by design: 
 Uno's link-lost alarm output, the siren and bed shaker, the button, power-loss
 resilience and the display.
 
-M4 Dexcom Share acquisition is implemented on `feat/m4-dexcom-share` and tested with
-synthetic data only. No live Dexcom request has been made. See
-[DEXCOM_SHARE.md](DEXCOM_SHARE.md) and the updated
-[plan](plans/2026-11-07-m4-dexcom-share.md).
+**M4 Dexcom Share acquisition is complete and live-validated** (merged in PR #7). See
+[DEXCOM_SHARE.md](DEXCOM_SHARE.md) and the
+[plan](plans/2026-11-07-m4-dexcom-share.md), whose section 13 holds the live record.
+
+- **Live validation (2026-11-13, owner-run on the Pi, owner-reported):**
+  - environment: Raspberry Pi 3 Model B, Debian 13, Python 3.13.5; Share region
+    `ous`; publisher credentials provisioned as encrypted systemd credentials;
+  - `make dexcom-credentials-check`: both credentials decrypt and are well-formed;
+  - `make dexcom-check`: authentication, login and one read succeeded on the first
+    attempt, with no retry. The read returned two Dexcom G7 entries, each with `DT`,
+    `ST`, `Trend`, `Value` and `WT`. Timestamp validation, the value-format check and
+    trend recognition passed, and the parser accepted the response. The newest
+    reading was 42 s old;
+  - `make dexcom-status` afterwards: `blocked: no`, last login attempt (UTC)
+    `2026-11-13T17:25:00.069100+00:00`, rate-limit backoff `None`;
+  - no physical alarm output was activated; none exists yet;
+  - not recorded anywhere: glucose values, credentials, account and session
+    identifiers.
+- **What the live check confirmed:** the `ous` endpoints, application id and request
+  bodies, the `sessionId` spelling, the entry shape, `WT` as the time of a current
+  reading, recognized trends and the accepted `User-Agent`.
+- **Still unconfirmed:** the LOW and HIGH encodings, session lifetime and renewal,
+  rate-limit behavior, error-response shapes, and continuous operation (the soak).
 
 - **Account:** read-only access through the publisher account. Current pydexcom and
   Nightscout clients show the API has no follower login. No account, invitation or
@@ -145,7 +164,7 @@ synthetic data only. No live Dexcom request has been made. See
   resolutions are recorded in section 11 of the plan. Testing them uncovered a sixth
   defect, now fixed: a body shorter than its `Content-Length` used to be accepted.
 
-**Root Makefile** (`feat/root-makefile`). A `Makefile` at the repository root is the
+**Root Makefile** (merged in PR #8). A `Makefile` at the repository root is the
 entry point for development, CI, firmware, the bench, the Raspberry Pi and Dexcom
 Share diagnostics. `make help` is the default target.
 
@@ -168,14 +187,41 @@ Share diagnostics. `make help` is the default target.
   `make setup-firmware firmware-build firmware-test`.
 - **Tests:** 88 Makefile tests; 761 in total.
 
+## Roadmap
+
+Corrected on 2026-11-13 by the owner. The audit's roadmap
+([2026-11-06](audits/2026-11-06-initial-audit.md#6-proposed-roadmap)) had M5 Display,
+M6 Deployment hardening and M7 Hardware integration.
+
+| Milestone | Scope | Status | Depends on |
+|---|---|---|---|
+| M0 to M3 | Housekeeping, alarm policy v2, simulated runtime, serial protocol v1 and firmware | Done; M3 bench-validated | |
+| M4 Dexcom Share acquisition | Read-only Share client, login protection, connectivity check | Done; live-validated 2026-11-13 | |
+| M5 HDMI display | Standalone bedside dashboard on the Waveshare 5-inch 800×480 display; display only | [Plan](plans/2026-11-13-m5-hdmi-display.md) proposed, awaiting approval | M4; a runtime supervised by systemd (decision D1 in the plan) |
+| M6 Physical siren and alarm hardware | Siren driver and Uno alarm outputs, the button, the audible link-lost alarm, hardware-in-the-loop tests | Not started | Components purchased; wiring and electrical review, including the Uno power topology (audit finding H5); retained-level persistence; explicit approval |
+| M7 Bed shaker and additional hardware | Bed-shaker driver, backup power and other peripherals | Not started | M6; components; wiring review |
+
+Deployment hardening is no longer a milestone of its own:
+
+- systemd supervision of the runtime is proposed for M5, because the display depends
+  on it (D1);
+- persisting the retained alarm level is scheduled before physical alarm outputs
+  (M6);
+- the hardware review may require backup power before any audible output, which would
+  move it from M7 to M6.
+
+Older entries in [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md) keep their wording: "M6"
+there means deployment hardening and "M7" hardware integration.
+
 ## Next milestone
 
-- **Second external review of M4** (PR #7, `feat/m4-dexcom-share`).
-- **The owner-approved read-only connectivity check** with the publisher credentials
-  ([DEXCOM_SHARE.md](DEXCOM_SHARE.md)). It confirms the endpoints, the response shape,
-  `WT` and `DT` agreement, and the trend format. Then a soak with outputs disabled.
-- **M5 display:** data age, faults and the Share status, including blocked
-  authentication.
+- **M5 HDMI display:** the design and implementation plan,
+  [plans/2026-11-13-m5-hdmi-display.md](plans/2026-11-13-m5-hdmi-display.md), awaits
+  owner approval and the decisions in its section 9. No M5 code exists.
+- **Open from M4:**
+  - the soak against Share with outputs disabled, proposed as part of the M5 Pi
+    validation;
+  - confirmation of the LOW and HIGH encodings when such a reading occurs.
 
 ## Known blockers and gaps
 
@@ -184,17 +230,21 @@ Share diagnostics. `make help` is the default target.
   - buzzer and bed-shaker electrical integration;
   - the physical button;
   - power-loss resilience;
-  - the Waveshare 800×480 display.
+  - the Waveshare 800×480 display (M5; checks H1 to H12 in its plan).
 - With Optiboot 4.4, power-on, brown-out and external resets all report `U`. A
   watchdog reset while the Pi is disconnected is lost from `cause` when the Pi
   reconnects, because opening the port resets the Uno again.
 - A restart forgets a retained alarm level during stale data (glucose becomes unknown
-  while the missing-data fault sounds). Persisting it is an open M6 item.
+  while the missing-data fault sounds). Persisting it is scheduled before physical
+  alarm outputs (M6).
 - The systemd clock check has not been run on the Pi; the Dexcom provider depends on
   it.
-- Dexcom Share is undocumented and has not been contacted. The response shape, the LOW
-  and HIGH encoding, the session lifetime and the rate-limit behavior are assumptions
-  until the connectivity check and real LOW or HIGH events confirm them.
+- Dexcom Share is undocumented. One read-only connectivity check passed on 2026-11-13.
+  The LOW and HIGH encoding, the session lifetime, the rate-limit behavior and the
+  error responses remain assumptions until real events confirm them.
+- The connectivity check used the state file in `~/glucose-guardian-state`. An
+  installed service must share one state file with the check, so that the 300 s login
+  interval spans both (decision D9 in the M5 plan).
 - The publisher credentials on the Pi are protected only by the host key on the same
   SD card (no TPM).
 - A service stop, crash or power loss during the few seconds of a Dexcom login blocks
@@ -205,9 +255,16 @@ Share diagnostics. `make help` is the default target.
 - Electrical drivers, backup power, GPIO mappings, button wiring and Uno power topology
   are unselected.
 - Physical outputs and button input require reviewed wiring and explicit approval.
-- GUI and systemd installation are absent.
-- Remaining audit findings: H5 (hardware review); M6 (M6); M9 (M5/M6); L5, and L6's
-  heartbeat timeout defined separately on the Pi and the Uno.
+- GUI and systemd installation are absent; both are planned in M5, pending approval.
+- `DexcomShareProvider.latest_trend` can describe a newer entry than the last valid
+  reading (finding F1 in the M5 plan). Nothing reads it yet; M5 step 1 replaces it.
+- Remaining audit findings:
+  - H5, the Uno power topology: hardware review before M6;
+  - M6, systemd supervision: proposed for M5 (D1);
+  - M9, Pi platform risks: the display stack, blanking and night brightness in M5,
+    under-voltage observed during the M5 Pi validation, SD-card wear open;
+  - L5;
+  - L6, the heartbeat timeout defined separately on the Pi and the Uno.
 
 No deployment has occurred. Official Dexcom and Omnipod alerts remain independent
 and unchanged. This is a supplementary prototype, not a certified medical device.
