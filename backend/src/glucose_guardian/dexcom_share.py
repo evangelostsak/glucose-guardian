@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, ClassVar
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode
 
 AUTHENTICATE = "General/AuthenticatePublisherAccount"
 LOGIN = "General/LoginPublisherAccountById"
@@ -20,6 +20,15 @@ SERVERS = {
     "ous": ("https://shareous1.dexcom.com" + SERVICES_PATH, APPLICATION_ID),
     "jp": ("https://share.dexcom.jp" + SERVICES_PATH, APPLICATION_ID_JP),
 }
+APPROVED_BASES = frozenset(base for base, _ in SERVERS.values())
+SIMULATOR_BASE = re.compile(r"http://127\.0\.0\.1:[0-9]{1,5}" + re.escape(SERVICES_PATH))
+APPROVED_BODIES = {
+    AUTHENTICATE: frozenset({"accountName", "password", "applicationId"}),
+    LOGIN: frozenset({"accountId", "password", "applicationId"}),
+    READ: frozenset(),
+}
+READ_QUERY = ("sessionId", "minutes", "maxCount")
+WINDOW_NUMBER = re.compile(r"[0-9]{1,4}")
 NIL_UUID = "00000000-0000-0000-0000-000000000000"
 UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 DATE = re.compile(r"/?Date\((\d{1,15})([+-]\d{4})?\)/?")
@@ -81,6 +90,10 @@ class ShareProtocolError(ShareError):
     status = ShareStatus.PROTOCOL_ERROR
 
 
+class ShareRequestRefused(ShareProtocolError):
+    pass
+
+
 class ShareSessionExpired(ShareError):
     status = ShareStatus.SERVER_ERROR
 
@@ -138,6 +151,44 @@ def read_url(base_url: str, session_id: str, minutes: int, max_count: int) -> st
         raise ValueError("minutes or maxCount out of range")
     query = urlencode({"sessionId": session_id, "minutes": minutes, "maxCount": max_count})
     return f"{base_url}{READ}?{query}"
+
+
+def _read_query(query: str) -> bool:
+    try:
+        pairs = parse_qsl(query, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        return False
+    if [key for key, _ in pairs] != list(READ_QUERY):
+        return False
+    session, minutes, count = (value for _, value in pairs)
+    if UUID.fullmatch(session) is None or WINDOW_NUMBER.fullmatch(minutes) is None \
+            or WINDOW_NUMBER.fullmatch(count) is None:
+        return False
+    return 1 <= int(minutes) <= MAX_MINUTES and 1 <= int(count) <= MAX_COUNT
+
+
+def _body_keys(body: bytes) -> frozenset[str] | None:
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict) or not all(isinstance(value, str) for value in data.values()):
+        return None
+    return frozenset(data)
+
+
+def check_request(base_url: str, url: str, body: bytes) -> None:
+    if base_url not in APPROVED_BASES and SIMULATOR_BASE.fullmatch(base_url) is None:
+        raise ShareRequestRefused("request refused: not an approved Dexcom Share server")
+    path, separator, query = url.partition("?")
+    endpoint = path[len(base_url):] if path.startswith(base_url) else None
+    if endpoint is None or endpoint not in APPROVED_BODIES:
+        raise ShareRequestRefused("request refused: not an approved read-only operation")
+    query_ok = _read_query(query) if endpoint == READ else separator == ""
+    if not query_ok:
+        raise ShareRequestRefused("request refused: unexpected query")
+    if _body_keys(body) != APPROVED_BODIES[endpoint]:
+        raise ShareRequestRefused("request refused: unexpected body")
 
 
 def _json(body: bytes) -> Any:
