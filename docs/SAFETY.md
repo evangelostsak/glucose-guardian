@@ -22,9 +22,9 @@ the link stays lost. The firmware has no button pin and drives no output yet.
 ## Failure modes
 
 The runtime connects the alarm engine to bounded acquisition, a clock check, a
-display frame and either a transport double or the serial transport (M3). There is
-still no Dexcom adapter, GUI or physical output, and no hardware has been flashed.
-"Simulated" below means verified with synthetic scenarios; "PC-tested" means verified
+display frame and either a transport double or the serial transport (M3). The Dexcom
+Share adapter (M4) has been tested only against a synthetic simulator, never against
+Dexcom. There is no GUI and no physical output. "Simulated" below means verified with synthetic scenarios; "PC-tested" means verified
 with pseudo-terminals, a Python Uno emulator, and native firmware unit tests.
 
 | Condition | Detected by | Indication | Status |
@@ -33,7 +33,15 @@ with pseudo-terminals, a Python Uno emulator, and native firmware unit tests.
 | Reading below 40 or above 400 mg/dL | Normal threshold classification | Urgent low or high glucose alarm (with the configured thresholds) | Engine implemented |
 | No reading, or reading older than `max_age_s` | Validation | `missing_data` fault; unresolved glucose alarm kept and shown as last known with its age; normal becomes unknown | Simulated |
 | Non-numeric, non-finite or non-positive value; naive timestamp; timestamp more than 60 s in the future | Validation | `invalid_reading` fault | Simulated |
-| Fetch error or exception | Acquisition worker | `acquisition` fault; latest reading used until stale | Simulated; Dexcom adapter M4 |
+| Fetch error or exception | Acquisition worker | `acquisition` fault; latest reading used until stale | Simulated; Dexcom Share adapter tested against the simulator |
+| Dexcom Share unreachable: DNS, refused or reset connection, TLS failure, request deadline | `ShareTransportError` | `acquisition` fault, then `missing_data` after `max_age_s`; recovers on the next successful fetch | Simulator and TLS tests; not run against Dexcom |
+| Dexcom Share HTTP error, HTML error page, redirect, oversized or malformed body, unknown entry structure, unknown trend, value outside 39 to 401, conflicting duplicates | `ShareServerError`, `ShareProtocolError`, `ShareTransportError` | `acquisition` fault; never treated as a reading; no login latch | Simulator tests; real response shape unverified |
+| Dexcom Share session expired | `SessionIdNotFound` or `SessionNotValid` | One login and read if the 300 s login interval allows; otherwise `acquisition` fault until it does | Simulator tests |
+| Rejected credentials or account lockout (`AccountPasswordInvalid`, `SSO_AuthenticateMaxAttemptsExceeded`, rejected login, nil identifier) | Login response | Automatic login blocked and persisted across restarts; status `auth_blocked`; `acquisition` and then `missing_data` faults; operator must fix and unblock | Simulator tests |
+| Dexcom Share rate limit (HTTP 429) | Response status | Exponential backoff (120 s to 1800 s, `Retry-After` honored); `acquisition` fault while backing off | Simulator tests; values provisional |
+| Service crash loop or restart | Persisted login state | At most one login attempt per 300 s within a boot; after a reboot the first login waits 300 s | Unit and simulator tests |
+| Dexcom Share returns the same, an older or no reading (phone not uploading) | Provider keeps the newest reading | Reading ages into `missing_data` after `max_age_s` | Simulator tests |
+| Dexcom LOW or HIGH | Values 39 and 401 (assumed encoding) | Urgent low or high through the unchanged thresholds; another encoding becomes an `acquisition` fault | Assumption pending a live response |
 | Fetch blocked or slower than `fetch_timeout_s` | Acquisition worker hard timeout | `acquisition` fault; supervisor keeps ticking; one thread at most | Simulated |
 | Pi clock not synchronized (no RTC on the Pi 3B), or the check fails or times out | Clock-check worker | `clock_unsynchronized` fault; readings not evaluated | Simulated; systemd check unit-tested, not yet run on the Pi |
 | Uno silent, unplugged, or answering with corrupted, outdated, duplicate or wrong-version frames | Round-trip link age above `heartbeat_timeout_s` | `communication` fault; port reopened with backoff | PC-tested; on the USB bench (owner-reported 2026-11-12): Uno rejection of invalid frames, recovery after a heartbeat pause, unplug detection, reconnect and backoff passed |
