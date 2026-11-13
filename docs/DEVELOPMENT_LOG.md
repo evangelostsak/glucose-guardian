@@ -1,5 +1,126 @@
 # Development log
 
+## 2026-11-12 — M4 Dexcom Share acquisition
+
+### Research (before implementation)
+
+Sources read on 2026-11-12:
+
+- `pydexcom` `main`: `const.py`, `dexcom.py`, `errors.py`, `glucose_reading.py`,
+  `README.md`;
+- `nightscout-connect` `lib/sources/dexcomshare.js`;
+- `share2nightscout-bridge` `index.js` and `README.md`. The bridge is deprecated and
+  points to nightscout-connect;
+- Dexcom's official API documentation of the 39 and 401 values;
+- Nightscout PR #7207 (LOW and HIGH for `share2` devices).
+
+Findings:
+
+- **Account:** the API authenticates the **publisher** account. pydexcom: "*not
+  follower*"; its FAQ: "Use the same credentials used to login to the Dexcom mobile
+  application publishing the glucose readings". The bridge "logs in to Dexcom Share as
+  the data publisher". Neither client has a follower login, so a dedicated follower
+  account is not supported. No account, invitation or follower setting was created or
+  changed.
+- **Endpoints and identifiers:** confirmed by both clients, including the outside-US
+  host `shareous1.dexcom.com` and the shared US and outside-US application id.
+- **Reading time:** pydexcom reads `DT` (with an offset), Nightscout reads `WT`. `WT`
+  was chosen; the connectivity check measures any disagreement.
+- **LOW and HIGH:** neither Share client special-cases them. Dexcom's official API
+  uses 39 and 401, and Nightscout displays them as LOW and HIGH for Share devices.
+  This is not confirmed for Share responses.
+- **No timeouts:** neither client sets one. pydexcom renews a session once on a session
+  error. nightscout-connect refreshes after about 23 h 50 min.
+
+### Changes and decisions
+
+- New modules:
+  - `dexcom_share.py`: protocol and strict parsing;
+  - `share_client.py`: `urllib` poster, `ShareSession`, `DexcomShareProvider`;
+  - `share_state.py`: persisted login state plus `status`/`unblock`;
+  - `credentials.py`;
+  - `share_simulator.py`;
+  - `share_check.py`: read-only connectivity check.
+- `config.py`: `provider = "dexcom_share"` with a strict `[dexcom]` table.
+  `[simulation]` is required only for the simulated provider, and the existing
+  rejections of `[dexcom]` with the simulated provider and of `provider = "dexcom"`
+  still hold.
+- `service.py`: Dexcom wiring with the systemd clock check. It exits with status 2 when
+  credentials or the state directory are missing.
+- Other files:
+  - `config/example-dexcom-share.toml` holds the approved values;
+  - the systemd template gained `LoadCredentialEncrypted=`, `StateDirectory=` and
+    `StateDirectoryMode=0700`.
+- Decisions:
+  - `WT` is the reading time, never the receipt time;
+  - an entry has exactly `WT`, `ST`, `DT`, `Value` and `Trend`;
+  - `Value` is an integer from 39 to 401;
+  - unknown trends, encodings and conflicting duplicates fail the fetch, as an
+    acquisition fault, rather than being guessed;
+  - the newest entry by timestamp wins, and older or repeated readings are not
+    returned again;
+  - at most 3 requests per fetch;
+  - environment proxies are ignored, and `User-Agent` is `glucose-guardian/<version>`.
+- Login protection:
+  - a hard 300 s floor between login attempts;
+  - each attempt persisted before the request, with a cooldown on `CLOCK_BOOTTIME`
+    within a boot;
+  - after a reboot, the first login waits 300 s, because the Pi has no real-time clock;
+  - a latch on `AccountPasswordInvalid`, `SSO_AuthenticateMaxAttemptsExceeded`,
+    `SSO_InternalError` with a rejected-login message, `InvalidArgument` during login,
+    or a nil identifier;
+  - an unreadable state file blocks login and an unwritable one refuses every login;
+  - HTTP 429 backoff from 120 s to 1800 s, honoring `Retry-After`. These values are
+    provisional.
+- The state file holds no credentials, account id or session id. Errors and logs carry
+  only classes, HTTP statuses and Share codes, never server messages, URLs, values or
+  secrets.
+
+### Hardware and protocol record
+
+- No GG1, firmware, GPIO, output, threshold or acknowledgement change. The production
+  hex is unchanged (`bde6b740…`).
+- New network dependency: outbound HTTPS to `shareous1.dexcom.com` when
+  `provider = "dexcom_share"`.
+
+### Validation
+
+- **Python 3.11.18 and 3.13.18:** ruff clean, mypy strict clean (30 files), pytest
+  540 passed. That is the 383 existing tests, unchanged, and 157 new: protocol, state,
+  credentials, client, runtime integration, connectivity check, configuration and
+  service. They cover:
+  - login success and failure, latching, lockout;
+  - session expiry and renewal, the login interval across restarts and reboots;
+  - HTTP 429 with and without `Retry-After`;
+  - HTTP and HTML errors, redirects, malformed and oversized bodies, slow and hung
+    responses, refused connections;
+  - a self-signed TLS certificate refused, environment proxies ignored;
+  - duplicate, stale, out-of-order and future readings, an unsynchronized clock;
+  - a hung request holding one worker thread, recovery after outages;
+  - secret redaction;
+  - the real service process reading from the simulator.
+- **Mutation check:** 24 safeguard mutations. The first run left one survivor: the
+  streaming body cap, previously covered only through `Content-Length`. Two tests were
+  added, and all 24 now fail the suite.
+- **Firmware:** both images build, and the native tests pass 27 of 27.
+- **No live Dexcom request** and no real credentials or glucose data were used.
+
+### Unresolved issues
+
+- Assumptions about Share need the owner-approved connectivity check:
+  - the response shape and the `sessionId` spelling;
+  - `WT`, `ST` and `DT` agreement and the trend format;
+  - acceptance of the `User-Agent`.
+
+  LOW and HIGH need a real out-of-range reading.
+- The session lifetime and rate-limit behavior are unknown; the 429 backoff values
+  are provisional.
+- DNS resolution is not covered by the request deadline. It is bounded by the
+  resolver, and the worker contains it.
+- The systemd clock check has not run on the Pi.
+- The credentials are protected only by the SD card's host key (no TPM).
+- README still says no Uno has been flashed, which has been false since PR #6.
+
 ## 2026-11-12 — M3 hardware bench validation recorded
 
 ### Results (owner-reported from the physical bench)
