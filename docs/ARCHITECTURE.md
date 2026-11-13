@@ -2,8 +2,10 @@
 
 The Pi owns acquisition, timestamp validation, deterministic glucose policy, HDMI
 display, and USB transport. The Uno independently supervises the Pi's state frames
-and demands its own link-lost alarm when they stop. systemd will supervise the Pi
-process (M6); the supplied unit is an uninstalled template.
+and demands its own link-lost alarm when they stop. systemd supervision of the Pi
+process is part of M5 (decision D1, approved, in the
+[M5 plan](plans/2026-11-13-m5-hdmi-display.md)); the supplied unit is an uninstalled
+template.
 
 | Module | Responsibility |
 |---|---|
@@ -32,7 +34,8 @@ process (M6); the supplied unit is an uninstalled template.
 clock synchronization status and heartbeat age, all as required arguments. Every call
 re-evaluates data age and heartbeat age, so the fixed-rate runtime detects faults
 independently of when readings arrive. Dexcom Share acquisition is described below
-and in [DEXCOM_SHARE.md](DEXCOM_SHARE.md); there is no GUI yet. The Uno
+and in [DEXCOM_SHARE.md](DEXCOM_SHARE.md). There is no GUI yet; the M5 plan designs
+the HDMI display. The Uno
 firmware lives in `firmware/arduino-uno/lib/guardian/` (testable C++) with Arduino
 glue in `src/main.cpp`; the protocol is specified in [PROTOCOL.md](PROTOCOL.md).
 
@@ -174,7 +177,7 @@ Display and transport exceptions are caught, counted (`display_errors`,
 failing `receive()` counts as an infinite link age, raising a communication
 fault (`LINK_DOWN`). Provider and clock-check exceptions become worker failures. Any other exception,
 such as an alarm-engine defect, propagates out of `run()`: the service logs it and
-exits with status 1 for systemd to restart (M6). The Uno heartbeat watchdog covers
+exits with status 1 for systemd to restart (not installed yet). The Uno heartbeat watchdog covers
 the gap.
 
 ### Restart
@@ -183,7 +186,7 @@ State is not persisted. A restarted runtime begins with unknown glucose and a
 missing-data fault, forgets any acknowledgement, and re-alarms. It also forgets a
 retained alarm level: after a restart during stale data, glucose is unknown (with the
 missing-data fault sounding) rather than the last urgent low. Persisting the retained
-level is an open M6 item.
+level is an open item, scheduled before physical alarm outputs (M6).
 
 ## Configuration
 
@@ -241,7 +244,8 @@ communication fault; a planned stop is not silent.
 `DexcomShareProvider` implements `GlucoseProvider` on the read-only, undocumented Share
 API. The full findings, assumptions and operator procedures are in
 [DEXCOM_SHARE.md](DEXCOM_SHARE.md). The client authenticates the publisher account,
-because the API has no follower login.
+because the API has no follower login. A read-only connectivity check against Dexcom
+passed on the Pi on 2026-11-13.
 
 **Each fetch** runs in the existing `BoundedWorker`, so at most one request is ever in
 flight. A fetch makes at most three HTTP requests:
@@ -337,7 +341,8 @@ resolver delays acquisition but starts no new thread.
 Every failure raises a `ShareError` and becomes the runtime's `acquisition` fault.
 `DexcomShareProvider.status` tells a blocked login apart from network, server,
 protocol, rate-limit and deferred-login states, for M5. `latest_trend` keeps the trend
-for M5; no alarm uses it. Logs and exceptions carry only error classes, HTTP statuses
+of the newest accepted entry; no alarm uses it. It can describe a newer entry than the
+last valid reading, so the M5 plan moves the trend into `Reading` (finding F1). Logs and exceptions carry only error classes, HTTP statuses
 and Share error codes: never credentials, identifiers, URLs, server messages or values.
 
 ## Serial transport

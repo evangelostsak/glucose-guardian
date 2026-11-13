@@ -4,12 +4,14 @@ Status:
 
 - Proposed on 2026-11-07.
 - Approved by the owner on 2026-11-12, with the decisions in section 8.
-- Implemented on `feat/m4-dexcom-share`. It was tested with synthetic data only; no
-  live Dexcom request has been made.
+- Implemented on `feat/m4-dexcom-share` and merged in PR #7. Until the live check it
+  was tested with synthetic data only.
 - The operator procedures are in [DEXCOM_SHARE.md](../DEXCOM_SHARE.md).
 - Revised on 2026-11-13 after the first external review of PR #7; section 11 lists
   the findings and their resolutions.
 - Read-only security audit on 2026-11-13: section 12.
+- **Completed and live-validated on 2026-11-13:** the read-only connectivity check
+  passed on the Pi (section 13).
 
 ## 1. Goal and boundaries
 
@@ -198,14 +200,19 @@ simulator over loopback HTTP; one test uses a self-signed TLS server. Results ar
 3. Provider, configuration, credentials, systemd clock wiring and runtime tests: done.
 4. Documentation: done. See ARCHITECTURE, SAFETY, DEXCOM_SHARE, PROJECT_STATUS and
    DEVELOPMENT_LOG.
-5. **Pending owner approval:** a read-only connectivity check with the owner's
-   credentials (`share_check`, procedure in DEXCOM_SHARE.md). After that, a soak
-   against the simulator and against Share, with outputs still disabled.
+5. A read-only connectivity check with the owner's credentials (`share_check`,
+   procedure in DEXCOM_SHARE.md): done on 2026-11-13, see section 13. The soak against
+   the simulator and against Share, with outputs still disabled, is open; it is
+   proposed as part of the M5 Pi validation.
 
 ## 10. Out of scope and risks
 
 Out of scope: the display (M5), deployment (M6), outputs (M7), anything involving the
 Omnipod 5, writing to Dexcom, trend-based alerts and persisting readings.
+
+These milestone numbers are those of 2026-11-07. The roadmap was corrected on
+2026-11-13: M5 HDMI display, M6 physical siren and alarm hardware, M7 bed shaker and
+additional hardware ([PROJECT_STATUS.md](../PROJECT_STATUS.md#roadmap)).
 
 Risks:
 
@@ -251,3 +258,29 @@ three levels:
 A static test confirms that only `share_client.py` can open network connections.
 No code or configuration interacts with Omnipod; the documents mention it only as
 untouched.
+
+## 13. Live validation (2026-11-13)
+
+The owner ran the procedure in DEXCOM_SHARE.md on the Pi and reported the results.
+Glucose values, credentials and identifiers are not recorded.
+
+| Item | Result |
+|---|---|
+| Environment | Raspberry Pi 3 Model B, Debian 13, Python 3.13.5; region `ous` (Germany) |
+| Credentials | Encrypted systemd credentials; `make dexcom-credentials-check` passed |
+| `make dexcom-check` | Authenticated, logged in and read once; no retry was needed |
+| Response | Two Dexcom G7 entries, each with `DT`, `ST`, `Trend`, `Value` and `WT` |
+| Checks | Timestamp validation, value format (integer from 39 to 401), trend recognition: passed. Parser: accepted |
+| Freshness | The newest reading was 42 s old |
+| `make dexcom-status` afterwards | `blocked: no`; last login attempt (UTC) `2026-11-13T17:25:00.069100+00:00`; rate-limit backoff `None` |
+| Physical outputs | None activated; none exist |
+
+Against the assumptions in DEXCOM_SHARE.md:
+
+- **Confirmed:** the `ous` endpoints, the application id and the request bodies; the
+  `sessionId` query spelling; the required entry keys; `WT` as the time of a current
+  reading; a recognized trend (the check accepts names and legacy numbers alike); the
+  `User-Agent`.
+- **Not exercised:** the LOW and HIGH encodings (decision 5 stays pending), session
+  lifetime and renewal, HTTP 429 and `Retry-After`, the JSON error codes, and
+  continuous operation.

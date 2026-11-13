@@ -259,7 +259,7 @@ bench criteria, not clinical or electrical limits.
   `rejected_before_first_reply` in `gg1.handshake` documents it.
 - **Uno link-lost alarm:** the Uno sends nothing while the Pi is silent and has no
   outputs, so its link-lost demand cannot be observed. Verifying it needs either output
-  integration (M7) or a protocol diagnostic, such as a report flag "link was lost since
+  integration (M6) or a protocol diagnostic, such as a report flag "link was lost since
   the last accepted frame"; that would be a protocol change for separate approval.
 
 ## Outputs

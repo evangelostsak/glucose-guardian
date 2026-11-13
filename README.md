@@ -64,7 +64,8 @@ firmware-test`. CI runs no hardware test and never contacts Dexcom.
   targets (`make help`).
 - `bench/`: Makefile for the USB-only Uno bench (build, deploy, flash, run, collect);
   see [docs/BENCH.md](docs/BENCH.md).
-- `deployment/systemd/`: inactive, uninstalled service template (M6).
+- `deployment/systemd/`: inactive, uninstalled service template; installation is
+  planned with M5.
 - `docs/`: [architecture](docs/ARCHITECTURE.md), [serial protocol](docs/PROTOCOL.md),
   [safety](docs/SAFETY.md), [electrical interface](docs/HARDWARE.md), and
   [Dexcom Share](docs/DEXCOM_SHARE.md).
@@ -72,12 +73,15 @@ firmware-test`. CI runs no hardware test and never contacts Dexcom.
 The M3 firmware and the USB serial link passed the owner-run bench validation on a
 Raspberry Pi 3B and a genuine Uno R3, including the watchdog test. The production
 firmware was then restored and verified (see
-[docs/BENCH.md](docs/BENCH.md#validation-record)). Only the bench harness has run on
-the Pi; the service has not been deployed. Nothing is connected to the Uno's pins, so
-the siren, bed shaker, button, display and the alarm system as a whole are not
-validated. Before hardware use, implement and validate button wiring, actuator
-drivers, the GUI, live Dexcom acquisition and systemd supervision. No real credentials
-or patient data belong in this repository.
+[docs/BENCH.md](docs/BENCH.md#validation-record)). The read-only Dexcom Share
+connectivity check passed on the Pi on 2026-11-13. Apart from that check, only the
+bench harness has run on the Pi; the service has not been deployed. Nothing is
+connected to the Uno's pins, so the siren, bed shaker, button, display and the alarm
+system as a whole are not validated. Before hardware use, implement and validate
+button wiring, actuator drivers, the GUI (M5,
+[plan](docs/plans/2026-11-13-m5-hdmi-display.md)), continuous live Dexcom acquisition
+and systemd supervision. No real credentials or patient data belong in this
+repository.
 
 ## License
 

@@ -5,11 +5,12 @@ Glucose Guardian can read the latest CGM value from Dexcom Share
 API. The official Dexcom G7 and Omnipod 5 alerts stay independent and unchanged.
 Nothing here writes to Dexcom, changes Share or followers, or touches the Omnipod 5.
 
-Status on 2026-11-13, after the first external review of PR #7:
+Status on 2026-11-13:
 
-- Implemented and tested against a local synthetic simulator only.
-- **No live Dexcom request has been made.**
-- Live connectivity needs the owner-approved check at the end of this document.
+- Implemented, and tested against a local synthetic simulator.
+- **Live-validated:** the owner-approved read-only connectivity check at the end of
+  this document passed on the Pi on 2026-11-13, on the first attempt.
+- The service has not yet run continuously against Dexcom.
 
 ## Required account
 
@@ -79,21 +80,21 @@ The following is implemented and tested against the synthetic simulator:
 
 ## Assumptions about the undocumented API
 
-These need verification against a real response. The connectivity check reports each
-one without printing glucose values.
+The connectivity check reports each one without printing glucose values. The last
+column is the owner-reported result of the check on 2026-11-13.
 
-| Assumption | Basis | If wrong |
-|---|---|---|
-| Endpoints, application id, request bodies | pydexcom and Nightscout agree | Login or read fails: `acquisition` fault, or the latch if Dexcom answers with a credential error |
-| Query parameter spelled `sessionId` | pydexcom (Nightscout uses `sessionID`) | Reads fail with a session or argument error: `acquisition` fault |
-| Entries contain `WT`, `ST`, `DT`, `Value`, `Trend`; other fields may be added | pydexcom and Nightscout parsing | A missing field rejects every read: `acquisition` fault, then `missing_data`. Added fields are ignored |
-| `WT` is the reading time; `ST` and `DT` agree with it | Nightscout uses `WT`; pydexcom uses `DT` | The reading time could be wrong: the check prints the offsets |
-| `Trend` is a name, or a legacy number from 0 to 9 | pydexcom says names replaced numbers | Reads are rejected: `acquisition` fault |
-| LOW is 39 and HIGH is 401 | Dexcom's official API and Nightscout; not confirmed for Share | Another encoding is rejected: `acquisition` fault instead of a glucose alarm |
-| Errors are HTTP errors with a JSON `Code` | pydexcom | Unknown errors are server errors and never latch |
-| Sessions last about 24 h | nightscout-connect | Any lifetime works; renewal is limited by the login interval |
-| HTTP 429 may carry `Retry-After` in seconds | HTTP standard | Without it, exponential backoff applies |
-| `User-Agent: glucose-guardian/<version>` is accepted | Not documented | Requests rejected: `acquisition` fault |
+| Assumption | Basis | If wrong | Live check 2026-11-13 |
+|---|---|---|---|
+| Endpoints, application id, request bodies | pydexcom and Nightscout agree | Login or read fails: `acquisition` fault, or the latch if Dexcom answers with a credential error | Confirmed for `ous` |
+| Query parameter spelled `sessionId` | pydexcom (Nightscout uses `sessionID`) | Reads fail with a session or argument error: `acquisition` fault | Confirmed |
+| Entries contain `WT`, `ST`, `DT`, `Value`, `Trend`; other fields may be added | pydexcom and Nightscout parsing | A missing field rejects every read: `acquisition` fault, then `missing_data`. Added fields are ignored | Confirmed: both entries had all five |
+| `WT` is the reading time; `ST` and `DT` agree with it | Nightscout uses `WT`; pydexcom uses `DT` | The reading time could be wrong: the check prints the offsets | Timestamp checks passed; newest `WT` 42 s old |
+| `Trend` is a name, or a legacy number from 0 to 9 | pydexcom says names replaced numbers | Reads are rejected: `acquisition` fault | Recognized; the check does not tell names from legacy numbers |
+| LOW is 39 and HIGH is 401 | Dexcom's official API and Nightscout; not confirmed for Share | Another encoding is rejected: `acquisition` fault instead of a glucose alarm | Not exercised |
+| Errors are HTTP errors with a JSON `Code` | pydexcom | Unknown errors are server errors and never latch | Not exercised |
+| Sessions last about 24 h | nightscout-connect | Any lifetime works; renewal is limited by the login interval | Not exercised |
+| HTTP 429 may carry `Retry-After` in seconds | HTTP standard | Without it, exponential backoff applies | Not exercised |
+| `User-Agent: glucose-guardian/<version>` is accepted | Not documented | Requests rejected: `acquisition` fault | Confirmed |
 
 ## Configuration
 
@@ -116,8 +117,8 @@ rejected.
 
 Credentials are read only from `$CREDENTIALS_DIRECTORY`, which systemd provides from
 `LoadCredentialEncrypted=`. Each credential file holds a single line. A file readable
-by other users is refused. This procedure is for an approved installation (M6); nothing
-here deploys the service.
+by other users is refused. Nothing here deploys the service; installing it is planned
+with M5 and needs approval.
 
 1. Encrypt the credentials as root, typing them at the prompt so they stay out of shell
    history:
@@ -147,7 +148,7 @@ the service user can read. The plaintext never touches the SD card.
 
 1. Change the password through Dexcom (the G7 app or Dexcom's account site), never
    from the Pi.
-2. Stop the service if it is installed (M6). On the Pi, in `~/glucose-guardian`, replace
+2. Stop the service if it is installed. On the Pi, in `~/glucose-guardian`, replace
    the changed credential:
 
    ```sh
@@ -203,6 +204,22 @@ login requests, across restarts too.
 3. Never unblock repeatedly without fixing the cause: every attempt counts toward
    Dexcom's lockout.
 
+## Moving the state file to the installed service
+
+The connectivity check keeps its login state in the file named by
+`config/local.dexcom.toml` (`~/glucose-guardian-state`). When the service is installed
+(M5), the file moves once to `/var/lib/glucose-guardian/dexcom-share-state.json`, by
+the procedure in section 3.8 of the
+[M5 plan](plans/2026-11-13-m5-hdmi-display.md#38-login-state-migration-d9). The exact
+commands follow with the installation.
+
+- **Never reset:** never delete, recreate, edit or unblock the file to simplify the
+  move. A missing file allows an immediate login and forgets a block.
+- **Exact copy:** byte for byte, mode 0600, owned by the service user, verified with
+  `share_state ... status` before the service starts.
+- **One file:** afterwards the check and the service use the same file, and the check
+  never runs while the service is active.
+
 ## SD-card limitations
 
 - The Raspberry Pi 3B has no TPM. `systemd-creds` therefore encrypts with the host key
@@ -219,9 +236,14 @@ login requests, across restarts too.
 
 ## Read-only connectivity check (owner approval required)
 
-This is the first live Dexcom contact. Run it only with explicit approval, once, and
-not within 5 minutes of another login attempt; the persisted interval enforces this
-anyway.
+**Result on 2026-11-13:** passed on the Pi on the first attempt (owner-reported). The
+record is in section 13 of the
+[M4 plan](plans/2026-11-07-m4-dexcom-share.md#13-live-validation-2026-11-13) and in
+[PROJECT_STATUS.md](PROJECT_STATUS.md).
+
+Run it again only with explicit approval, for example after a credential rotation or
+to confirm the LOW and HIGH encodings, and not within 5 minutes of another login
+attempt; the persisted interval enforces this anyway.
 
 `python -m glucose_guardian.share_check` makes one session request (authenticate,
 login) and one read.
