@@ -1,3 +1,5 @@
+import base64
+import json
 import os
 import pty
 import re
@@ -8,10 +10,13 @@ import stat
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from harness import ROOT
+
+from glucose_guardian.share_state import fresh_state, write_state
 
 pytestmark = pytest.mark.skipif(shutil.which("make") is None or sys.platform != "linux",
                                 reason="the Makefile targets Linux hosts with GNU make")
@@ -20,9 +25,15 @@ MAKEFILE = ROOT / "Makefile"
 FAKE_VENV = "/fake/venv"
 PORT = "/dev/serial/by-id/usb-Arduino_Uno_SYNTHETIC-if00"
 SECRET = "synthetic-secret-typed-at-the-prompt"
+OLD_USERNAME = "synthetic-publisher-old"
+OLD_PASSWORD = "synthetic-password-old"
+NEW_VALUE = "synthetic-replacement-value"
 PI = ["PI_USER=pi", "PI_HOST=raspberrypi.local"]
-EVERY_VARIABLE = [f"VENV={FAKE_VENV}", f"SERIAL_PORT={PORT}", "VARIANT=production", *PI]
-DEXCOM_CONTACT = ("sudo systemd-run", "glucose_guardian.share_check")
+EVERY_VARIABLE = [f"VENV={FAKE_VENV}", f"SERIAL_PORT={PORT}", "VARIANT=production",
+                  "CREDENTIAL=password", *PI]
+DEXCOM_CONTACT = "glucose_guardian.share_check"
+SYSTEMD_RUN = "sudo systemd-run"
+SYSTEMD_RUN_TARGETS = {"dexcom-check", "dexcom-credentials-check", "dexcom-credentials-rotate"}
 FIRMWARE_WRITE = ("flash:w:", " flash DEVICE=")
 
 
@@ -106,8 +117,15 @@ def test_every_phony_target_is_described_in_help():
                                               "sed 's|/var/lib/glucose-guardian|/state|'"]),
     ("dexcom-credentials", [], ["systemd-ask-password -n \"Dexcom Share $name:\" | sudo "
                                 "systemd-creds encrypt --name=dexcom-$name - \"$file.new\""]),
-    ("dexcom-status", ["STATE_DIR=/state"], ["-m glucose_guardian.share_state --state-file "
-                                              "/state/dexcom-share-state.json status"]),
+    ("dexcom-status", [], [f"-m glucose_guardian.share_state --config "
+                           f"{ROOT}/config/local.dexcom.toml status"]),
+    ("dexcom-credentials-check", [], ["sudo systemd-run --pipe --wait",
+                                      "-m glucose_guardian.credentials"]),
+    ("dexcom-credentials-rotate", ["CREDENTIAL=password"],
+     ['Type "replace dexcom-password" to continue:',
+      "printf '%s' \"$first\" | sudo systemd-creds encrypt --name=dexcom-password - \"$new\"",
+      "LoadCredentialEncrypted=dexcom-password:\"$pass\"", "-m glucose_guardian.credentials",
+      'sudo mv -f "$new" "$current"']),
     ("dexcom-check", [], ['Type "contact dexcom" to send these requests:',
                           "sudo systemd-run --pipe --wait",
                           "LoadCredentialEncrypted=dexcom-username:/etc/glucose-guardian/"
@@ -124,9 +142,9 @@ def test_targets_run_the_intended_commands(target, args, expected):
 def test_only_dexcom_check_can_contact_dexcom_and_only_firmware_flash_writes_firmware():
     for target in phony_targets():
         output = dry(target, *EVERY_VARIABLE)
-        contacts = any(marker in output for marker in DEXCOM_CONTACT)
         writes = any(marker in output for marker in FIRMWARE_WRITE)
-        assert contacts == (target == "dexcom-check"), target
+        assert (DEXCOM_CONTACT in output) == (target == "dexcom-check"), target
+        assert (SYSTEMD_RUN in output) == (target in SYSTEMD_RUN_TARGETS), target
         assert writes == (target == "firmware-flash"), target
 
 
@@ -155,22 +173,69 @@ def test_missing_variables_stop_before_any_command(args, message):
     assert result.stdout == ""
 
 
+FAKE_PRELUDE = '''import base64, json, os, subprocess, sys, tempfile
+from pathlib import Path
+with open(os.environ["FAKE_LOG"], "a") as log:
+    log.write(" ".join([{name!r}, *sys.argv[1:]]) + "\\n")
+'''
+FAKE_ASK_PASSWORD = f'''answers = os.environ.get("FAKE_ANSWERS")
+if answers is None:
+    sys.stdout.write({SECRET!r})
+else:
+    lines = Path(answers).read_text().split("\\n")
+    Path(answers).write_text("\\n".join(lines[1:]))
+    sys.stdout.write(lines[0])
+'''
+FAKE_CREDS = '''with open(os.environ["FAKE_ENVIRONMENTS"], "a") as dump:
+    dump.write("\\n".join(f"{key}={value}" for key, value in os.environ.items()) + "\\n")
+data = sys.stdin.buffer.read()
+if os.environ.get("FAKE_ENCRYPT_FAIL"):
+    sys.exit(1)
+name = next(arg.split("=", 1)[1] for arg in sys.argv if arg.startswith("--name="))
+Path(sys.argv[-1]).write_text(json.dumps({"name": name,
+                                          "data": base64.b64encode(data).decode()}))
+'''
+FAKE_RUN = '''if os.environ.get("FAKE_RUN") != "emulate":
+    sys.exit(1)
+args, sources, index = sys.argv[1:], {}, 0
+while args[index].startswith("-"):
+    if args[index] == "-p":
+        key, _, value = args[index + 1].partition("=")
+        if key == "LoadCredentialEncrypted":
+            name, _, source = value.partition(":")
+            sources[name] = source
+        index += 2
+    else:
+        index += 1
+command = args[index:]
+if "glucose_guardian.share_check" in command:
+    sys.exit(99)
+directory = Path(tempfile.mkdtemp(dir=os.environ["FAKE_TMP"]))
+for name, source in sources.items():
+    record = json.loads(Path(source).read_text())
+    if record["name"] != name:
+        sys.exit(f"credential {name} was encrypted under another name")
+    (directory / name).write_bytes(base64.b64decode(record["data"]))
+    (directory / name).chmod(0o400)
+environment = os.environ | {"CREDENTIALS_DIRECTORY": str(directory)}
+sys.exit(subprocess.run(command, env=environment).returncode)
+'''
+
+
 def fake_tools(directory: Path) -> Path:
     bin_dir = directory / "fakebin"
     bin_dir.mkdir()
-    scripts = {
-        "sudo": '[ "$1" = "-v" ] && exit 0\nexec "$@"',
-        "systemd-run": "exit 1",
-        "systemd-ask-password": f"printf '%s' '{SECRET}'",
-        "systemd-creds": 'env >> "$FAKE_ENVIRONMENTS"\ncat > /dev/null\n'
-                         'for last in "$@"; do :; done\necho encrypted > "$last"',
-        "ssh": "exit 0",
-        "rsync": "exit 0",
-        "avrdude": "exit 0",
-    }
-    for name, body in scripts.items():
+    shell = {"sudo": '[ "$1" = "-v" ] && exit 0\nexec "$@"', "ssh": "exit 0",
+             "rsync": "exit 0", "avrdude": "exit 0"}
+    for name, body in shell.items():
         path = bin_dir / name
         path.write_text(f'#!/bin/bash\nprintf "%s\\n" "{name} $*" >> "$FAKE_LOG"\n{body}\n')
+        path.chmod(0o755)
+    python = {"systemd-ask-password": FAKE_ASK_PASSWORD, "systemd-creds": FAKE_CREDS,
+              "systemd-run": FAKE_RUN}
+    for name, body in python.items():
+        path = bin_dir / name
+        path.write_text(f"#!{sys.executable}\n" + FAKE_PRELUDE.format(name=name) + body)
         path.chmod(0o755)
     return bin_dir
 
@@ -183,22 +248,33 @@ def fake_venv(directory: Path) -> Path:
     return python.parent.parent
 
 
+def dexcom_config(path: Path, state_dir: Path) -> Path:
+    example = (ROOT / "config" / "example-dexcom-share.toml").read_text()
+    path.write_text(example.replace("/var/lib/glucose-guardian", str(state_dir)))
+    return path
+
+
 @pytest.fixture
 def host(tmp_path):
     log = tmp_path / "calls.log"
     log.touch()
     environments = tmp_path / "environments.log"
     environments.touch()
+    fake_tmp = tmp_path / "fake-tmp"
+    fake_tmp.mkdir()
     bin_dir = fake_tools(tmp_path)
-    config = tmp_path / "local.dexcom.toml"
-    config.write_text("synthetic\n")
+    state_dir = tmp_path / "state"
+    config = dexcom_config(tmp_path / "local.dexcom.toml", state_dir)
     credentials = tmp_path / "credentials"
+    venv = fake_venv(tmp_path)
     return {
         "log": log, "environments": environments, "credentials": credentials,
+        "config": config, "state_file": state_dir / "dexcom-share-state.json",
         "env": {"PATH": f"{bin_dir}:{os.environ['PATH']}", "FAKE_LOG": str(log),
-                "FAKE_ENVIRONMENTS": str(environments)},
-        "args": [f"VENV={fake_venv(tmp_path)}", f"DEXCOM_CONFIG={config}",
-                 f"STATE_DIR={tmp_path / 'state'}", f"CREDENTIALS_DIR={credentials}"],
+                "FAKE_ENVIRONMENTS": str(environments), "FAKE_TMP": str(fake_tmp)},
+        "base": [f"VENV={venv}", f"DEXCOM_CONFIG={config}", f"CREDENTIALS_DIR={credentials}"],
+        "args": [f"VENV={venv}", f"DEXCOM_CONFIG={config}", f"STATE_DIR={state_dir}",
+                 f"CREDENTIALS_DIR={credentials}"],
     }
 
 
@@ -275,10 +351,20 @@ def run_in_terminal(root: Path, args: list[str], env: dict[str, str],
     return os.waitstatus_to_exitcode(status), output.decode(errors="replace")
 
 
+def fake_credential(name: str, value: str) -> str:
+    return json.dumps({"name": name, "data": base64.b64encode(value.encode()).decode()})
+
+
+def decrypted(path: Path) -> str:
+    return base64.b64decode(json.loads(path.read_text())["data"]).decode()
+
+
 def provision(host) -> None:
     host["credentials"].mkdir(mode=0o700)
-    for name in ("username", "password"):
-        (host["credentials"] / f"dexcom-{name}.cred").write_text("encrypted\n")
+    for name, value in (("username", OLD_USERNAME), ("password", OLD_PASSWORD)):
+        written = host["credentials"] / f"dexcom-{name}.cred"
+        written.write_text(fake_credential(f"dexcom-{name}", value))
+        written.chmod(0o600)
 
 
 @pytest.mark.parametrize("answer", ["", "yes", "contact Dexcom", "contact dexcom please"])
@@ -318,7 +404,7 @@ def test_credentials_are_encrypted_from_the_prompt_and_never_passed_on(host):
     assert stat.S_IMODE(credentials.stat().st_mode) == 0o700
     for name in ("username", "password"):
         written = credentials / f"dexcom-{name}.cred"
-        assert written.read_text() == "encrypted\n"
+        assert json.loads(written.read_text())["name"] == f"dexcom-{name}"
         assert stat.S_IMODE(written.stat().st_mode) == 0o600
     assert not list(credentials.glob("*.new"))
     log = host["log"].read_text()
@@ -364,3 +450,172 @@ def test_firmware_flash_refuses_an_unknown_variant_and_a_missing_terminal(host, 
                  root=staged_root, extra=host["env"])
     assert batch.returncode == 2 and "needs an interactive terminal" in batch.stderr
     assert calls(host) == []
+
+
+def blocked_state(state_file: Path) -> None:
+    state_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    write_state(state_file, replace(fresh_state("boot-a"), blocked_reason="AccountPasswordInvalid",
+                                    blocked_utc="2026-01-01T00:00:00+00:00"))
+
+
+def test_dexcom_status_reads_the_state_file_named_in_the_config(host):
+    blocked_state(host["state_file"])
+    result = make("dexcom-status", *host["base"], extra=host["env"])
+    assert result.returncode == 0, result.stderr
+    assert f"state file: {host['state_file']}" in result.stdout
+    assert "blocked: AccountPasswordInvalid" in result.stdout
+
+
+def test_a_state_dir_that_matches_the_config_is_accepted(host):
+    result = make("dexcom-status", *host["args"], extra=host["env"])
+    assert result.returncode == 0 and f"state file: {host['state_file']}" in result.stdout
+
+
+@pytest.mark.parametrize("target", ["dexcom-status", "dexcom-check", "dexcom-config"])
+def test_a_state_dir_that_disagrees_with_the_config_is_refused(host, tmp_path, target):
+    other = tmp_path / "other-state"
+    result = make(target, *host["base"], f"STATE_DIR={other}", extra=host["env"])
+    assert result.returncode == 2
+    assert f"STATE_DIR={other} does not match {host['config']}" in result.stderr
+    assert "the state file always comes from DEXCOM_CONFIG" in result.stderr
+    assert not other.exists() and not host["state_file"].exists()
+    assert calls(host) == []
+
+
+def test_dexcom_check_preflight_and_share_check_use_the_same_config(host):
+    provision(host)
+    blocked_state(host["state_file"])
+    code, output = run_in_terminal(ROOT, ["dexcom-check", *host["base"]], host["env"],
+                                   "contact dexcom")
+    assert f"state file: {host['state_file']}" in output
+    assert "blocked: AccountPasswordInvalid" in output
+    (run,) = [call for call in calls(host) if call.startswith("systemd-run")]
+    assert run.endswith(f"-m glucose_guardian.share_check --config {host['config']}")
+
+
+def test_dexcom_config_creates_and_reports_the_configured_state(host, tmp_path):
+    config, state_dir = tmp_path / "generated.toml", tmp_path / "generated-state"
+    venv = host["base"][0]
+    created = make("dexcom-config", venv, f"DEXCOM_CONFIG={config}", f"STATE_DIR={state_dir}",
+                   extra=host["env"])
+    assert created.returncode == 0, created.stderr
+    assert f"state file: {state_dir}/dexcom-share-state.json" in created.stdout
+    assert stat.S_IMODE(state_dir.stat().st_mode) == 0o700
+    text = config.read_text()
+    kept = make("dexcom-config", venv, f"DEXCOM_CONFIG={config}", extra=host["env"])
+    assert kept.returncode == 0 and "exists; kept" in kept.stdout
+    assert f"state file: {state_dir}/dexcom-share-state.json" in kept.stdout
+    assert config.read_text() == text
+
+
+def test_status_reports_the_state_file_named_in_the_config(host):
+    blocked_state(host["state_file"])
+    result = make("status", *host["base"], extra=host["env"])
+    assert f"dexcom state: {host['state_file']}" in result.stdout
+
+
+def with_answers(host, tmp_path: Path, *values: str) -> dict[str, str]:
+    answers = tmp_path / "answers"
+    answers.write_text("\n".join(values))
+    return host["env"] | {"FAKE_ANSWERS": str(answers), "FAKE_RUN": "emulate"}
+
+
+def rotate(host, env: dict[str, str], credential: str, answer: str | None) -> tuple[int, str]:
+    return run_in_terminal(ROOT, ["dexcom-credentials-rotate", f"CREDENTIAL={credential}",
+                                  *host["base"]], env, answer)
+
+
+def assert_never_exposed(host, output: str, *values: str) -> None:
+    for value in filter(None, values):
+        assert value not in host["log"].read_text()
+        assert value not in host["environments"].read_text()
+        assert value not in output
+
+
+@pytest.mark.parametrize("credential,other", [("password", "username"),
+                                              ("username", "password")])
+def test_rotation_swaps_in_the_new_credential_only_after_validation(host, tmp_path, credential,
+                                                                    other):
+    provision(host)
+    kept = (host["credentials"] / f"dexcom-{other}.cred").read_text()
+    env = with_answers(host, tmp_path, NEW_VALUE, NEW_VALUE)
+    code, output = rotate(host, env, credential, f"replace dexcom-{credential}")
+    assert code == 0, output
+    assert f"dexcom-{credential} replaced" in output
+    replaced = host["credentials"] / f"dexcom-{credential}.cred"
+    assert decrypted(replaced) == NEW_VALUE
+    assert json.loads(replaced.read_text())["name"] == f"dexcom-{credential}"
+    assert stat.S_IMODE(replaced.stat().st_mode) == 0o600
+    assert (host["credentials"] / f"dexcom-{other}.cred").read_text() == kept
+    assert not list(host["credentials"].glob("*.new"))
+    (run,) = [call for call in calls(host) if call.startswith("systemd-run")]
+    assert f"LoadCredentialEncrypted=dexcom-{credential}:{replaced}.new" in run
+    current = host["credentials"] / f"dexcom-{other}.cred"
+    assert f"LoadCredentialEncrypted=dexcom-{other}:{current}" in run
+    assert run.endswith("-m glucose_guardian.credentials")
+    assert_never_exposed(host, output, NEW_VALUE, OLD_USERNAME, OLD_PASSWORD)
+
+
+@pytest.mark.parametrize("entries,failure,message", [
+    ((NEW_VALUE, NEW_VALUE + "-typo"), {}, "the two entries differ"),
+    (("x" * 300, "x" * 300), {}, "validation failed; dexcom-password is unchanged"),
+    (("", ""), {}, "validation failed; dexcom-password is unchanged"),
+    ((NEW_VALUE, NEW_VALUE), {"FAKE_ENCRYPT_FAIL": "1"}, "Error"),
+])
+def test_a_failed_rotation_keeps_the_current_credential(host, tmp_path, entries, failure,
+                                                        message):
+    provision(host)
+    current = host["credentials"] / "dexcom-password.cred"
+    before = current.read_text()
+    env = with_answers(host, tmp_path, *entries) | failure
+    code, output = rotate(host, env, "password", "replace dexcom-password")
+    assert code == 2 and message in output
+    assert current.read_text() == before and decrypted(current) == OLD_PASSWORD
+    assert not list(host["credentials"].glob("*.new"))
+    assert_never_exposed(host, output, *entries)
+
+
+@pytest.mark.parametrize("answer", ["", "yes", "replace dexcom-username",
+                                    "replace dexcom-password now"])
+def test_rotation_without_the_exact_confirmation_asks_for_nothing(host, tmp_path, answer):
+    provision(host)
+    before = (host["credentials"] / "dexcom-password.cred").read_text()
+    env = with_answers(host, tmp_path, NEW_VALUE, NEW_VALUE)
+    code, output = rotate(host, env, "password", answer)
+    assert code == 2 and "cancelled: nothing was done" in output
+    assert not any(call.startswith(("systemd-ask-password", "systemd-creds", "systemd-run"))
+                   for call in calls(host))
+    assert (host["credentials"] / "dexcom-password.cred").read_text() == before
+
+
+def test_rotation_refuses_without_a_valid_credential_name_a_terminal_or_credentials(host,
+                                                                                     tmp_path):
+    missing = make("dexcom-credentials-rotate", *host["base"], extra=host["env"])
+    assert missing.returncode == 2 and "CREDENTIAL is required" in missing.stderr
+    both = make("dexcom-credentials-rotate", "CREDENTIAL=both", *host["base"], extra=host["env"])
+    assert both.returncode == 2 and "CREDENTIAL must be username or password" in both.stderr
+    batch = make("dexcom-credentials-rotate", "CREDENTIAL=password", *host["base"],
+                 extra=host["env"])
+    assert batch.returncode == 2 and "needs an interactive terminal" in batch.stderr
+    assert calls(host) == []
+    code, output = rotate(host, with_answers(host, tmp_path, NEW_VALUE, NEW_VALUE), "password",
+                          "replace dexcom-password")
+    assert code == 2 and "run make dexcom-credentials" in output
+    assert not any(call.startswith("systemd-ask-password") for call in calls(host))
+
+
+def test_credentials_check_decrypts_through_systemd_without_contacting_dexcom(host):
+    provision(host)
+    env = host["env"] | {"FAKE_RUN": "emulate"}
+    valid = make("dexcom-credentials-check", *host["base"], extra=env)
+    assert valid.returncode == 0, valid.stderr
+    assert "both decrypt and are well-formed" in valid.stdout
+    (run,) = [call for call in calls(host) if call.startswith("systemd-run")]
+    assert run.endswith("-m glucose_guardian.credentials")
+    password = host["credentials"] / "dexcom-password.cred"
+    password.write_text(fake_credential("dexcom-username", OLD_PASSWORD))
+    assert make("dexcom-credentials-check", *host["base"], extra=env).returncode == 2
+    password.write_text(fake_credential("dexcom-password", "two\nlines"))
+    rejected = make("dexcom-credentials-check", *host["base"], extra=env)
+    assert rejected.returncode == 2 and "must be one non-empty line" in rejected.stderr
+    assert OLD_PASSWORD not in rejected.stdout + rejected.stderr
