@@ -256,6 +256,23 @@ Each request:
 - refuses redirects and ignores environment proxies;
 - is never retried.
 
+**Read-only allowlist.** Before anything is sent, `ShareSession._call` passes every
+request through `dexcom_share.check_request`. The request must meet all of these:
+
+- **Server:** one of the three Dexcom Share hosts in `SERVERS`, over HTTPS, or the
+  loopback simulator `http://127.0.0.1:<port>`.
+- **Endpoint:** exactly `General/AuthenticatePublisherAccount`,
+  `General/LoginPublisherAccountById` or `Publisher/ReadPublisherLatestGlucoseValues`.
+- **Query:** none for the two login steps. For the read, exactly `sessionId` (a UUID),
+  `minutes` (1 to 1440) and `maxCount` (1 to 288), in that order.
+- **Body:** a JSON object with exactly the documented keys and string values. The read
+  body is `{}`.
+
+Anything else raises `ShareRequestRefused` (a protocol error) and sends nothing.
+`urllib_poster` only sends POST, has no method or header parameter, and refuses every
+redirect. Only `share_client.py` imports network client modules (`service.py` imports
+`ssl` only to build the TLS context), and a test enforces this.
+
 **Deadline enforcement.** `urllib_poster` installs its own HTTP and HTTPS connection
 classes, so the deadline covers more than each single socket operation:
 
