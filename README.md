@@ -24,9 +24,10 @@ cp ../config/example.toml ../config/local.toml
 
 The demo prints four synthetic readings and exits. The service runs the simulated
 runtime with the scenario named in `[simulation]` until SIGTERM or Ctrl+C; it logs
-alarm and fault changes, never glucose values. Neither accesses Dexcom or drives
-outputs, and the service opens a serial port only when `[transport] kind = "serial"`
-is configured. `config/local.toml` is git-ignored. All example thresholds are
+alarm and fault changes, never glucose values. Neither drives outputs. The service
+reads Dexcom Share only with `provider = "dexcom_share"` and systemd-provided
+credentials (see [docs/DEXCOM_SHARE.md](docs/DEXCOM_SHARE.md)), and opens a serial port
+only when `[transport] kind = "serial"` is configured. `config/local.toml` is git-ignored. All example thresholds are
 synthetic test values, not clinical recommendations.
 
 ```sh
@@ -41,16 +42,19 @@ flashed with this firmware.
 
 ## Layout
 
-- `backend/`: Python package: alarm policy, simulated runtime, scenarios,
-  display/transport boundaries and doubles, and pytest tests.
+- `backend/`: Python package: alarm policy, runtime, scenarios, Dexcom Share
+  acquisition with a synthetic simulator, display/transport boundaries and doubles,
+  and pytest tests.
 - `firmware/arduino-uno/`: PlatformIO firmware: protocol v1, link supervision,
   button classification and watchdog; no pins assigned and outputs disabled.
-- `config/example.toml`: secret-free example settings.
+- `config/example.toml`, `config/example-dexcom-share.toml`: secret-free example
+  settings (simulated and Dexcom Share acquisition).
 - `bench/`: Makefile for the USB-only Uno bench (build, deploy, flash, run, collect);
   see [docs/BENCH.md](docs/BENCH.md).
 - `deployment/systemd/`: inactive, uninstalled service template (M6).
 - `docs/`: [architecture](docs/ARCHITECTURE.md), [serial protocol](docs/PROTOCOL.md),
-  [safety](docs/SAFETY.md), and [electrical interface](docs/HARDWARE.md).
+  [safety](docs/SAFETY.md), [electrical interface](docs/HARDWARE.md), and
+  [Dexcom Share](docs/DEXCOM_SHARE.md).
 
 Before hardware use, bench-validate the serial link and firmware, then implement and
 validate button wiring, actuator drivers, GUI, Dexcom acquisition, and systemd
