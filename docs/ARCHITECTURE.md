@@ -3,7 +3,7 @@
 The Pi owns acquisition, timestamp validation, deterministic glucose policy, HDMI
 display, and USB transport. The Uno independently supervises the Pi's state frames
 and demands its own link-lost alarm when they stop. systemd supervision of the Pi
-process is proposed for M5 (decision D1 in the
+process is part of M5 (decision D1, approved, in the
 [M5 plan](plans/2026-11-13-m5-hdmi-display.md)); the supplied unit is an uninstalled
 template.
 
