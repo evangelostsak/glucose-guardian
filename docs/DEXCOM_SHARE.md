@@ -5,7 +5,7 @@ Glucose Guardian can read the latest CGM value from Dexcom Share
 API. The official Dexcom G7 and Omnipod 5 alerts stay independent and unchanged.
 Nothing here writes to Dexcom, changes Share or followers, or touches the Omnipod 5.
 
-Status on 2026-11-12:
+Status on 2026-11-13, after the first external review of PR #7:
 
 - Implemented and tested against a local synthetic simulator only.
 - **No live Dexcom request has been made.**
@@ -33,8 +33,12 @@ The following is implemented and tested against the synthetic simulator:
 
 - HTTPS through `urllib` with certificate verification against the system CA store.
 - Bounds on every request:
-  - a per-request deadline;
+  - a per-request deadline that covers connecting to every resolved address, the TLS
+    handshake, the headers and the body, however slowly the server sends. DNS
+    resolution is the exception: it cannot be interrupted, and the request fails as
+    soon as it returns late;
   - a 64 KiB body cap, enforced with and without `Content-Length`;
+  - a body shorter than its `Content-Length` is rejected;
   - redirects refused;
   - environment proxies ignored;
   - no automatic retries.
@@ -43,9 +47,13 @@ The following is implemented and tested against the synthetic simulator:
 - Login protection, kept across restarts in the state file:
   - at least 300 s between login attempts, persisted *before* each attempt;
   - a latch on rejected credentials or lockout;
-  - backoff on HTTP 429.
+  - a latch when a login's outcome was never recorded (`LoginOutcomeUnknown`), so a
+    rejection lost to a crash or a failed write is not retried after a restart;
+  - backoff on HTTP 429, cleared only by a read that passes the parser, never by a
+    bare HTTP 200.
 - Strict parsing of each entry:
-  - exactly `WT`, `ST`, `DT`, `Value` and `Trend`;
+  - the required fields `WT`, `ST`, `DT`, `Value` and `Trend`; additional fields are
+    ignored and never read;
   - `WT` as the UTC reading time;
   - an integer `Value` from 39 to 401;
   - a known trend.
@@ -68,7 +76,7 @@ one without printing glucose values.
 |---|---|---|
 | Endpoints, application id, request bodies | pydexcom and Nightscout agree | Login or read fails: `acquisition` fault, or the latch if Dexcom answers with a credential error |
 | Query parameter spelled `sessionId` | pydexcom (Nightscout uses `sessionID`) | Reads fail with a session or argument error: `acquisition` fault |
-| Entry keys are exactly `WT`, `ST`, `DT`, `Value`, `Trend` | pydexcom and Nightscout parsing | Every read is rejected: `acquisition` fault, then `missing_data` |
+| Entries contain `WT`, `ST`, `DT`, `Value`, `Trend`; other fields may be added | pydexcom and Nightscout parsing | A missing field rejects every read: `acquisition` fault, then `missing_data`. Added fields are ignored |
 | `WT` is the reading time; `ST` and `DT` agree with it | Nightscout uses `WT`; pydexcom uses `DT` | The reading time could be wrong: the check prints the offsets |
 | `Trend` is a name, or a legacy number from 0 to 9 | pydexcom says names replaced numbers | Reads are rejected: `acquisition` fault |
 | LOW is 39 and HIGH is 401 | Dexcom's official API and Nightscout; not confirmed for Share | Another encoding is rejected: `acquisition` fault instead of a glucose alarm |
@@ -142,6 +150,11 @@ login requests, across restarts too.
      app works first.
    - `InvalidArgument` or `NilIdentifier`: the user name is malformed or unknown.
    - `StateUnreadable`: the state file was damaged.
+   - `LoginOutcomeUnknown`: a login was sent but its result was never recorded. The
+     service crashed, was stopped or lost power during the login, or the state file
+     could not be written (look for `Dexcom Share state could not be written` in the
+     log). Check that the state directory is writable and that the official app
+     still logs in; the credentials may have been rejected.
 2. Stop the service, run `python -m glucose_guardian.share_state --state-file
    <state_file> unblock`, then start the service. The login interval still applies
    after unblocking.
@@ -159,8 +172,8 @@ login requests, across restarts too.
 - **What a leak exposes:** the publisher password opens the whole Dexcom account. Use
   a password unique to Dexcom, keep the Pi physically secure, and change the password
   through Dexcom if the card is lost.
-- **The state file** contains no secrets: only timestamps, the backoff and the block
-  reason.
+- **The state file** contains no secrets: only timestamps, the backoff, the block
+  reason and whether a login is in progress.
 
 ## Read-only connectivity check (owner approval required)
 
@@ -171,11 +184,12 @@ anyway.
 `python -m glucose_guardian.share_check` makes one session request (authenticate,
 login) and one read.
 
-- **It prints:** the entry count, each entry's keys and JSON types, the age of `WT`,
-  the `ST` and `DT` offsets from `WT`, the `DT` time-zone offset, whether `Value` is an
-  integer from 39 to 401, whether `Trend` is recognized, and whether the parser accepts
-  the response.
-- **It never prints:** glucose values, trends, credentials or identifiers.
+- **It prints:** the entry count, each entry's keys and JSON types, any missing
+  required key, the number of additional keys, the age of `WT`, the `ST` and `DT`
+  offsets from `WT`, the `DT` time-zone offset, whether `Value` is an integer from 39
+  to 401, whether `Trend` is recognized, and whether the parser accepts the response.
+- **It never prints:** glucose values, trends, the values of additional fields,
+  credentials or identifiers.
 
 It uses the same state file, login interval and latch as the service.
 
@@ -216,7 +230,10 @@ It uses the same state file, login interval and latch as the service.
 6. Send back the complete output; it contains no values or secrets. Expected for a
    healthy account:
    - `Dexcom Share responded`;
-   - `entries:` 1 to 3, each with keys `['DT', 'ST', 'Trend', 'Value', 'WT']`;
+   - `entries:` 1 to 3, each with keys that include `DT`, `ST`, `Trend`, `Value` and
+     `WT`, and no `missing required keys` line;
+   - `additional keys ignored:` 0, or the count of extra fields Dexcom adds; their
+     names and types are listed in the `keys` line, never their values;
    - a `WT age` of a few minutes;
    - small `ST minus WT` and `DT minus WT` offsets;
    - `DT offset +0100` or `+0200`;
