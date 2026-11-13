@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import Enum
 
+from .dexcom_share import Trend
 from .providers import Reading
 
 
@@ -17,6 +18,7 @@ class Fetch(str, Enum):
 class Segment:
     duration_s: float
     mg_dl: float | None
+    trend: Trend | None
     frozen: bool
     fetch: Fetch
     clock_synchronized: bool
@@ -60,35 +62,42 @@ class ScenarioProvider:
         if segment.mg_dl is None:
             return None
         if segment.frozen:
-            return Reading(segment.mg_dl, self._start_wall + timedelta(seconds=start_s))
-        return Reading(segment.mg_dl, now)
+            return Reading(segment.mg_dl, self._start_wall + timedelta(seconds=start_s),
+                           segment.trend)
+        return Reading(segment.mg_dl, now, segment.trend)
 
 
-def _ok(duration_s: float, mg_dl: float | None) -> Segment:
-    return Segment(duration_s, mg_dl, frozen=False, fetch=Fetch.OK, clock_synchronized=True,
-                   heartbeat=True)
+def _ok(duration_s: float, mg_dl: float | None, trend: Trend | None) -> Segment:
+    return Segment(duration_s, mg_dl, trend, frozen=False, fetch=Fetch.OK,
+                   clock_synchronized=True, heartbeat=True)
 
 
 def _scenario(name: str, *segments: Segment) -> Scenario:
     return Scenario(name, segments)
 
 
+FLAT = Trend.FLAT
 SCENARIOS = {s.name: s for s in (
-    _scenario("normal", _ok(600, 110)),
-    _scenario("hypoglycemia", _ok(300, 110), _ok(300, 65), _ok(300, 50), _ok(600, 110)),
-    _scenario("hyperglycemia", _ok(300, 110), _ok(600, 300), _ok(600, 110)),
-    _scenario("stale_data", _ok(300, 50), replace(_ok(1200, 50), frozen=True),
-              _ok(600, 110)),
-    _scenario("missing_data", _ok(600, None), _ok(600, 110)),
-    _scenario("invalid_readings", _ok(300, 110), _ok(300, float("nan")), _ok(600, 110)),
-    _scenario("acquisition_timeout", _ok(300, 110), replace(_ok(300, 110), fetch=Fetch.HANG),
-              _ok(600, 110)),
-    _scenario("acquisition_errors", _ok(300, 110), replace(_ok(300, 110), fetch=Fetch.ERROR),
-              _ok(600, 110)),
-    _scenario("clock_failure", replace(_ok(300, 110), clock_synchronized=False),
-              _ok(600, 110)),
-    _scenario("communication_loss", _ok(300, 110), replace(_ok(300, 110), heartbeat=False),
-              _ok(600, 110)),
-    _scenario("simultaneous_faults", _ok(300, 50),
-              replace(_ok(1200, 50), fetch=Fetch.ERROR, heartbeat=False), _ok(600, 110)),
+    _scenario("normal", _ok(600, 110, FLAT)),
+    _scenario("hypoglycemia", _ok(300, 110, FLAT), _ok(300, 65, Trend.SINGLE_DOWN),
+              _ok(300, 50, Trend.FORTY_FIVE_DOWN), _ok(600, 110, Trend.DOUBLE_UP)),
+    _scenario("hyperglycemia", _ok(300, 110, FLAT), _ok(600, 300, Trend.SINGLE_UP),
+              _ok(600, 110, Trend.SINGLE_DOWN)),
+    _scenario("stale_data", _ok(300, 50, Trend.FORTY_FIVE_DOWN),
+              replace(_ok(1200, 50, Trend.FORTY_FIVE_DOWN), frozen=True),
+              _ok(600, 110, Trend.FORTY_FIVE_UP)),
+    _scenario("missing_data", _ok(600, None, None), _ok(600, 110, FLAT)),
+    _scenario("invalid_readings", _ok(300, 110, FLAT), _ok(300, float("nan"), FLAT),
+              _ok(600, 110, FLAT)),
+    _scenario("acquisition_timeout", _ok(300, 110, FLAT),
+              replace(_ok(300, 110, FLAT), fetch=Fetch.HANG), _ok(600, 110, FLAT)),
+    _scenario("acquisition_errors", _ok(300, 110, FLAT),
+              replace(_ok(300, 110, FLAT), fetch=Fetch.ERROR), _ok(600, 110, FLAT)),
+    _scenario("clock_failure", replace(_ok(300, 110, FLAT), clock_synchronized=False),
+              _ok(600, 110, FLAT)),
+    _scenario("communication_loss", _ok(300, 110, FLAT),
+              replace(_ok(300, 110, FLAT), heartbeat=False), _ok(600, 110, FLAT)),
+    _scenario("simultaneous_faults", _ok(300, 50, Trend.FORTY_FIVE_DOWN),
+              replace(_ok(1200, 50, Trend.FORTY_FIVE_DOWN), fetch=Fetch.ERROR, heartbeat=False),
+              _ok(600, 110, Trend.FORTY_FIVE_UP)),
 )}
