@@ -37,8 +37,7 @@ pio test --project-dir firmware/arduino-uno -e native
 ```
 
 CI runs ruff, mypy and pytest on Python 3.11 and 3.13, compiles the Uno firmware, and
-runs the firmware unit tests natively. No hardware test is implied; no Uno has been
-flashed with this firmware.
+runs the firmware unit tests natively. CI runs no hardware test.
 
 ## Layout
 
@@ -56,10 +55,15 @@ flashed with this firmware.
   [safety](docs/SAFETY.md), [electrical interface](docs/HARDWARE.md), and
   [Dexcom Share](docs/DEXCOM_SHARE.md).
 
-Before hardware use, bench-validate the serial link and firmware, then implement and
-validate button wiring, actuator drivers, GUI, Dexcom acquisition, and systemd
-supervision. No real credentials or patient data belong in this repository. Nothing
-has been deployed to a Raspberry Pi or flashed to an Uno.
+The M3 firmware and the USB serial link passed the owner-run bench validation on a
+Raspberry Pi 3B and a genuine Uno R3, including the watchdog test. The production
+firmware was then restored and verified (see
+[docs/BENCH.md](docs/BENCH.md#validation-record)). Only the bench harness has run on
+the Pi; the service has not been deployed. Nothing is connected to the Uno's pins, so
+the siren, bed shaker, button, display and the alarm system as a whole are not
+validated. Before hardware use, implement and validate button wiring, actuator
+drivers, the GUI, live Dexcom acquisition and systemd supervision. No real credentials
+or patient data belong in this repository.
 
 ## License
 
