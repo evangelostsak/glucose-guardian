@@ -1,5 +1,110 @@
 # Development log
 
+## 2026-11-13 — Root Makefile (`feat/root-makefile`)
+
+### Inspection
+
+- **Python:** `backend/pyproject.toml` (Python 3.11 or newer, `test` and `lint`
+  extras, pytest `pythonpath = ["src"]`).
+- **Entry points:** `glucose_guardian` (demo), `.service`, `.share_simulator`,
+  `.share_check`, `.share_state`, `.bench`.
+- **CI and firmware:** `.github/workflows/ci.yml` with direct `pip`, `pio` and
+  `pytest` calls, and `platformio.ini` with the `uno`, `uno-watchdog-test` and
+  `native` environments.
+- **Bench:** `bench/Makefile`. Its `flash` already requires a `/dev/serial/by-id`
+  device, an explicit `VARIANT`, `CONFIRM=watchdog-test` with a bootloader
+  authorization, SHA256SUMS verification and flash records.
+- **Dexcom:** `docs/DEXCOM_SHARE.md`, covering provisioning and the connectivity
+  check.
+- **Deployment:** `deployment/systemd/glucose-guardian.service`, a template that is
+  not installable.
+
+### Decisions
+
+- **Delegation:** the bench, flash and firmware staging targets call `bench/Makefile`
+  with `VENV` and `PYTHON` passed explicitly. GNU make gives these precedence over the
+  caller's command-line overrides, which `make` passes down; I checked this
+  empirically. The sub-make is called with `$(MAKE)` written in each recipe line, so
+  `make -n` also shows the bench commands.
+- **`firmware-build`** stages both images with SHA256SUMS in `bench/out`, so
+  `firmware-flash` on the Pi always has checksummed images. It never uploads.
+- **`firmware-flash`** adds a typed `flash <variant>` confirmation and checks for
+  staged images. The bench Makefile's own checks still apply.
+- **Dexcom targets** follow the documented procedure:
+  - `dexcom-config` writes the Git-ignored `config/local.dexcom.toml`;
+  - `dexcom-credentials` writes each credential under a temporary name and renames it
+    only when encryption succeeds, and keeps existing files;
+  - `dexcom-check` shows the login state, requires a terminal and `contact dexcom`,
+    runs `share_check` once under `sudo systemd-run`, and on failure says not to
+    retry.
+- **`DEXCOM_CONFIG`** is a variable separate from `CONFIG`, so the live check and
+  `simulate` can never use each other's configuration.
+- **`simulate`** runs the service with `env -u CREDENTIALS_DIRECTORY`, so even a Dexcom
+  configuration cannot reach Dexcom: the service exits with status 2 before any
+  request.
+- **SSH:** the `pi-*` targets run on the laptop. `PI_USER`, `PI_HOST` and `PI_DIR`
+  are validated before `ssh` or `rsync` runs. `PI_DIR` must be a plain path under the
+  Pi user's home, because `pi-sync` uses `rsync --delete`.
+- **`clean`** removes only caches and `firmware/arduino-uno/.pio`. It keeps `.venv`,
+  `config/local.*`, `bench/out`, `bench/reports` and the Dexcom state.
+- **Defaults:** `PYTHON=python3`, `VENV=.venv`, `CONFIG=config/example.toml`,
+  `PI_DIR=glucose-guardian`, `SIMULATOR_PORT=8765` (the port in the docs) and
+  `SHARE_SCENARIO=normal`. `PI_USER`, `PI_HOST`, `SERIAL_PORT` and `VARIANT` have no
+  default, and targets that need them stop with an example.
+- **Omitted, with reasons:**
+  - `pi-logs`: no service is installed (M6), and the connectivity check's output goes
+    to the terminal, not the journal;
+  - `bench-restore`: it would duplicate `firmware-flash VARIANT=production`;
+  - a demo target: `python -m glucose_guardian` stays documented.
+
+### Validation
+
+All runs used scratch copies of the repository; the working tree, `.venv`, `bench/out`
+and `bench/reports` were not touched.
+
+- **Python 3.13, scratch copy:** `make setup` (twice, idempotent), `lint`,
+  `typecheck`, `test` (663 passed before the Makefile tests existed),
+  `setup-firmware`, `firmware-build` (production `bde6b740…`), `firmware-test` (27 of
+  27).
+- **Runtime targets:**
+  - `simulator` (banner, stops on SIGINT);
+  - `simulate` (runtime started and stopped);
+  - `simulate` with a Dexcom config and `CREDENTIALS_DIRECTORY` set by the caller
+    (exit 2, credentials withheld);
+  - `status`;
+  - `dexcom-config` (twice; the second run kept the file);
+  - `dexcom-status`;
+  - `clean` (removed caches, kept `.venv`, `bench/out`, `bench/reports`, the local
+    config and the state).
+- **Missing dependencies:** each stops with a fix: no venv (`make setup`), no PlatformIO
+  (`make setup-firmware`), and missing variables.
+- **CI replay, fresh copy:** `make setup PYTHON=python` and `make lint typecheck test`
+  on Python 3.11.18 (729 passed), then `make setup-firmware` and `make firmware-build
+  firmware-test`.
+- **Makefile tests (`backend/tests/test_makefile.py`, 66):**
+  - help is the default target from any directory and describes every phony target;
+  - each target's dry-run commands;
+  - only `dexcom-check` can contact Dexcom, and only `firmware-flash` writes firmware;
+  - `clean` stays inside the repository;
+  - missing variables stop before any command;
+  - unsafe `PI_DIR` and SSH targets are refused before `ssh` runs;
+  - the `pi-sync` excludes;
+  - on a pseudo-terminal with fake tools: wrong confirmations contact or flash nothing,
+    `dexcom-check` runs exactly once and never retries, missing credentials stop it,
+    and `dexcom-credentials` keeps the secret out of every argument and environment.
+- **Mutation check:** 12 of 12 Makefile mutations fail the tests. The first run hung on
+  an unanswered prompt; the terminal helper now kills the child after 30 s.
+- **Not run:** `firmware-flash`, the bench targets against hardware, `pi-sync` and
+  `pi-setup` against a real Pi, `dexcom-credentials` with real systemd, and
+  `dexcom-check`. They were checked only through dry runs and fakes: no hardware, Pi or
+  Dexcom contact.
+
+### Unresolved
+
+- On Debian 13, the Pi needs GNU make; the bench workflow already used it.
+- `pi-sync` copies the laptop's `bench/out` over the Pi's; run `make firmware-build`
+  first when the firmware changed.
+
 ## 2026-11-13 — M4 read-only security audit
 
 Requirement: Glucose Guardian only authenticates and reads glucose. It never changes
