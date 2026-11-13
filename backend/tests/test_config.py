@@ -6,7 +6,7 @@ from harness import EXAMPLE, ROOT
 from harness import write_config as write
 from share_harness import DEXCOM_EXAMPLE
 
-from glucose_guardian.config import ConfigError, DexcomSettings, load_config
+from glucose_guardian.config import ConfigError, DexcomSettings, DisplaySettings, load_config
 
 
 def test_example_config_loads():
@@ -171,3 +171,65 @@ def test_invalid_dexcom_config_names_the_problem(tmp_path, replacement, message)
     path = write_dexcom(tmp_path, replacement)
     with pytest.raises(ConfigError, match=re.escape(message)):
         load_config(path)
+
+
+DISPLAY_LOG = '[display]\nkind = "log"\n'
+
+
+def test_example_display_settings(tmp_path):
+    config = load_config(EXAMPLE)
+    assert config.display == DisplaySettings(
+        snapshot_file=Path("/tmp/glucose-guardian-display.json"), snapshot_max_age_s=5,
+        refresh_s=1, last_known_cutoff_s=1800, framebuffer=Path("/dev/fb0"),
+        font_file=Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"))
+    assert config.outputs_enabled is False
+    dexcom = load_config(DEXCOM_EXAMPLE).display
+    assert dexcom is not None
+    assert dexcom.snapshot_file == Path("/run/glucose-guardian/display.json")
+
+
+def test_log_display_needs_only_its_kind(tmp_path):
+    text = EXAMPLE.read_text()
+    start = text.index("[display]")
+    end = text.index("[hardware]")
+    path = tmp_path / "local.toml"
+    path.write_text(text[:start] + DISPLAY_LOG + text[end:])
+    assert load_config(path).display is None
+
+
+def test_display_table_is_required(tmp_path):
+    text = EXAMPLE.read_text()
+    path = tmp_path / "local.toml"
+    path.write_text(text[:text.index("[display]")] + text[text.index("[hardware]"):])
+    with pytest.raises(ConfigError, match=r"missing \['display'\]"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("replacement,message", [
+    (('kind = "snapshot"', 'kind = "hdmi"'), "[display] kind must be one of"),
+    (('kind = "snapshot"', 'kind = "log"'), "[display] has unknown keys"),
+    (("refresh_s = 1\n", ""), "[display] is missing ['refresh_s']"),
+    (("refresh_s = 1\n", 'refresh_s = 1\ncolor = "red"\n'), "unknown keys ['color']"),
+    (("last_known_cutoff_s = 1800", "last_known_cutoff_s = 0"),
+     "last_known_cutoff_s must be a positive number"),
+    (("last_known_cutoff_s = 1800", "last_known_cutoff_s = 600"),
+     "last_known_cutoff_s must exceed [alarm] max_age_s"),
+    (("snapshot_max_age_s = 5", "snapshot_max_age_s = 1"),
+     "snapshot_max_age_s must exceed [runtime] tick_s"),
+    (("refresh_s = 1", "refresh_s = 5"), "refresh_s must be below snapshot_max_age_s"),
+    (("refresh_s = 1", "refresh_s = true"), "refresh_s must be a positive number"),
+    (('snapshot_file = "/tmp/glucose-guardian-display.json"', 'snapshot_file = "display.json"'),
+     "snapshot_file must be an absolute path"),
+    (('font_file = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"', "font_file = 3"),
+     "font_file must be an absolute path"),
+    (('framebuffer = "/dev/fb0"', 'framebuffer = "fb0"'), "framebuffer must be an absolute path"),
+])
+def test_invalid_display_settings(tmp_path, replacement, message):
+    text = EXAMPLE.read_text()
+    old, new = replacement
+    assert old in text
+    path = tmp_path / "local.toml"
+    path.write_text(text.replace(old, new))
+    with pytest.raises(ConfigError) as error:
+        load_config(path)
+    assert message in str(error.value)
