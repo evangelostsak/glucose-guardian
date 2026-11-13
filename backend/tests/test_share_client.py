@@ -4,10 +4,18 @@ import ssl
 import subprocess
 import threading
 import time
+from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-from share_harness import CREDENTIALS, make_session, make_store
+from share_harness import (
+    CREDENTIALS,
+    START,
+    StateWrites,
+    make_session,
+    make_store,
+    synthetic,
+)
 
 from glucose_guardian.credentials import Credentials
 from glucose_guardian.dexcom_share import (
@@ -24,7 +32,9 @@ from glucose_guardian.share_simulator import (
     SYNTHETIC_PASSWORD,
     SYNTHETIC_USERNAME,
     Fault,
+    share_entry,
 )
+from glucose_guardian.share_state import LOGIN_UNKNOWN
 
 
 @pytest.fixture
@@ -151,6 +161,123 @@ def test_rate_limited_login_still_counts_as_a_login_attempt(simulator, state_fil
     assert counts(simulator) == (2, 1, 1)
 
 
+def persisted(state_file, key):
+    return json.loads(state_file.read_text())[key]
+
+
+def recent(simulator):
+    simulator.source = lambda now: [synthetic(110, now - timedelta(seconds=60), "Flat")]
+
+
+def raw_entry(mg_dl, **changes):
+    return share_entry(synthetic(mg_dl, START - timedelta(seconds=60), "Flat")) | changes
+
+
+@pytest.mark.parametrize("fault,raw_entries", [
+    (Fault.MALFORMED, None),
+    (None, [raw_entry(110, Value=500)]),
+    (None, [raw_entry(110), raw_entry(111)]),
+    (None, [raw_entry(110, WT="2026-01-01T00:00:00Z")]),
+    (None, {"Value": 110}),
+])
+def test_invalid_200_reads_keep_the_rate_limit_backoff(simulator, state_file, share_clock,
+                                                       fault, raw_entries):
+    recent(simulator)
+    session = session_for(simulator, state_file, share_clock, timeout_s=2.0,
+                          credentials=CREDENTIALS)
+    session.read(10, 3)
+    simulator.set_fault(Fault.RATE_LIMIT, "read")
+    with pytest.raises(ShareRateLimited):
+        session.read(10, 3)
+    assert persisted(state_file, "rate_limit_backoff_s") == 120.0
+    simulator.set_fault(fault, "read")
+    simulator.raw_entries = raw_entries
+    share_clock.advance(120)
+    with pytest.raises(ShareProtocolError):
+        session.read(10, 3)
+    assert persisted(state_file, "rate_limit_backoff_s") == 120.0
+    simulator.set_fault(Fault.RATE_LIMIT, "read")
+    simulator.raw_entries = None
+    with pytest.raises(ShareRateLimited):
+        session.read(10, 3)
+    assert persisted(state_file, "rate_limit_backoff_s") == 240.0
+    simulator.set_fault(None, "read")
+    share_clock.advance(240)
+    assert session.read(10, 3)[0].mg_dl == 110
+    assert persisted(state_file, "rate_limit_backoff_s") is None
+    assert persisted(state_file, "rate_limited_until_boottime_s") is None
+    assert counts(simulator) == (1, 1, 5)
+    restarted = session_for(simulator, state_file, share_clock, timeout_s=2.0,
+                            credentials=CREDENTIALS)
+    assert restarted.read(10, 3)[0].mg_dl == 110
+    assert counts(simulator) == (2, 2, 6)
+
+
+def test_invalid_200_login_keeps_the_rate_limit_backoff(simulator, state_file, share_clock):
+    recent(simulator)
+    simulator.set_fault(Fault.RATE_LIMIT, "authenticate")
+    session = session_for(simulator, state_file, share_clock, timeout_s=2.0,
+                          credentials=CREDENTIALS)
+    with pytest.raises(ShareRateLimited):
+        session.read(10, 3)
+    simulator.set_fault(Fault.MALFORMED, "authenticate")
+    share_clock.advance(300)
+    with pytest.raises(ShareProtocolError):
+        session.read(10, 3)
+    assert persisted(state_file, "rate_limit_backoff_s") == 120.0
+    assert persisted(state_file, "login_pending") is False
+    simulator.set_fault(None, "authenticate")
+    share_clock.advance(300)
+    assert session.read(10, 3)[0].mg_dl == 110
+    assert persisted(state_file, "rate_limit_backoff_s") is None
+    assert counts(simulator) == (3, 1, 1)
+
+
+def test_block_that_cannot_be_written_sends_no_login_after_restart(simulator, state_file,
+                                                                   share_clock, monkeypatch):
+    writes = StateWrites(monkeypatch)
+    simulator.password = "rotated-elsewhere"
+    session = session_for(simulator, state_file, share_clock, timeout_s=2.0,
+                          credentials=CREDENTIALS)
+    writes.fail_after = writes.attempts + 1
+    with pytest.raises(ShareAuthBlocked, match="AccountPasswordInvalid"):
+        session.read(10, 3)
+    assert writes.failures == 1 and counts(simulator) == (1, 0, 0)
+    share_clock.advance(10**5)
+    with pytest.raises(ShareAuthBlocked, match="AccountPasswordInvalid"):
+        session.read(10, 3)
+    writes.fail_after = None
+    for _ in range(3):
+        restarted = session_for(simulator, state_file, share_clock, timeout_s=2.0,
+                                credentials=CREDENTIALS)
+        share_clock.advance(10**5)
+        with pytest.raises(ShareAuthBlocked, match=LOGIN_UNKNOWN):
+            restarted.read(10, 3)
+    assert counts(simulator) == (1, 0, 0)
+
+
+@pytest.mark.parametrize("endpoint", ["authenticate", "login"])
+@pytest.mark.parametrize("fault,error", [
+    (Fault.SERVER_ERROR, ShareServerError), (Fault.HANG, ShareTransportError),
+    (Fault.RATE_LIMIT, ShareRateLimited), (Fault.MALFORMED, ShareProtocolError),
+])
+def test_every_login_result_is_recorded_before_a_restart(simulator, state_file, share_clock,
+                                                         endpoint, fault, error):
+    recent(simulator)
+    simulator.set_fault(fault, endpoint)
+    session = session_for(simulator, state_file, share_clock, timeout_s=0.5,
+                          credentials=CREDENTIALS)
+    with pytest.raises(error):
+        session.read(10, 3)
+    assert persisted(state_file, "login_pending") is False
+    simulator.set_fault(None, endpoint)
+    share_clock.advance(1800)
+    restarted = session_for(simulator, state_file, share_clock, timeout_s=2.0,
+                            credentials=CREDENTIALS)
+    assert restarted.read(10, 3)[0].mg_dl == 110
+    assert persisted(state_file, "login_pending") is False
+
+
 @pytest.mark.parametrize("fault,error,text", [
     (Fault.SERVER_ERROR, ShareServerError, "HTTP 500 ServiceUnavailable"),
     (Fault.HTML_ERROR, ShareServerError, "HTTP 500 without code"),
@@ -181,7 +308,7 @@ def test_slow_and_hung_responses_end_within_the_request_deadline(simulator, stat
     simulator.slow_s = 5.0
     simulator.set_fault(fault, "read")
     started = time.monotonic()
-    with pytest.raises(ShareTransportError, match="TimeoutError"):
+    with pytest.raises(ShareTransportError, match="deadline exceeded"):
         session.read(10, 3)
     assert time.monotonic() - started < 2.0
 
