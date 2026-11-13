@@ -9,7 +9,7 @@ NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 def check(value: object, age_s: float) -> Validity:
-    reading = Reading(value, NOW - timedelta(seconds=age_s))
+    reading = Reading(value, NOW - timedelta(seconds=age_s), None)
     return validate(reading, now=NOW, max_age_s=600, max_future_skew_s=60)
 
 
@@ -36,16 +36,16 @@ def test_out_of_display_range_values_are_valid(value):
 
 @pytest.mark.parametrize("timestamp", [NOW.replace(tzinfo=None), None])
 def test_naive_or_missing_timestamp_is_invalid(timestamp):
-    reading = Reading(110, timestamp)
+    reading = Reading(110, timestamp, None)
     assert validate(reading, now=NOW, max_age_s=600, max_future_skew_s=60) is Validity.INVALID
 
 
 def test_non_utc_offset_is_compared_correctly():
-    reading = Reading(110, NOW.astimezone(timezone(timedelta(hours=2))))
+    reading = Reading(110, NOW.astimezone(timezone(timedelta(hours=2))), None)
     assert validate(reading, now=NOW, max_age_s=600, max_future_skew_s=60) is Validity.VALID
 
 
 def test_naive_now_raises():
     with pytest.raises(ValueError):
-        validate(Reading(110, NOW), now=NOW.replace(tzinfo=None), max_age_s=600,
+        validate(Reading(110, NOW, None), now=NOW.replace(tzinfo=None), max_age_s=600,
                  max_future_skew_s=60)
