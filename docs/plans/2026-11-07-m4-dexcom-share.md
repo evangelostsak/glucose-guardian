@@ -9,6 +9,7 @@ Status:
 - The operator procedures are in [DEXCOM_SHARE.md](../DEXCOM_SHARE.md).
 - Revised on 2026-11-13 after the first external review of PR #7; section 11 lists
   the findings and their resolutions.
+- Read-only security audit on 2026-11-13: section 12.
 
 ## 1. Goal and boundaries
 
@@ -231,3 +232,22 @@ one.
 | 3 | Entries had to have exactly five keys | Brittle by design | Required keys are enforced and additional fields ignored. Value and timestamp validation are unchanged |
 | 4 | Persistence failures | Yes. A block that could not be written was forgotten at restart, and the service logged in again after 300 s. A stale partial file could make the state file mode 0644, and a failed rename left the partial file behind | `login_pending` marker with `LoginOutcomeUnknown` latch. `fchmod` 0600 and cleanup of the partial file on failure |
 | 5 | README said no Uno had been flashed | Yes | README states the M3 bench result and what remains unvalidated |
+
+## 12. Read-only security audit (2026-11-13)
+
+Requirement: authenticate and read glucose only, and never change account settings,
+followers, sharing, alerts, glucose records or devices. Before the audit, the three
+operations were the only ones the code built, but nothing stopped another URL from
+being sent: the restriction held only by convention. The audit added
+`dexcom_share.check_request`, an explicit allowlist covering server, endpoint, query
+and body. `ShareSession._call` applies it before every request. Tests check it at
+three levels:
+
+- the request check itself;
+- the session, before anything is sent;
+- what a recording server actually receives, including the HTTP method and five
+  redirect statuses.
+
+A static test confirms that only `share_client.py` can open network connections.
+No code or configuration interacts with Omnipod; the documents mention it only as
+untouched.
