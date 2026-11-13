@@ -1,5 +1,124 @@
 # Development log
 
+## 2026-11-13 — M4 review follow-up (PR #7)
+
+The first external review of PR #7, at `bfb4582d`, requested changes in five areas.
+Each finding was first checked against the code. New tests run against `bfb4582d`
+showed the defect, then pass with the fix.
+
+### Findings and resolutions
+
+1. **HTTP success versus valid success** (`share_client.py`):
+   - **Defect:** `ShareSession._call()` cleared the rate-limit state on any HTTP 200,
+     before parsing. After a 429, a malformed or invalid 200 reset the backoff, so
+     the next 429 started again at 120 s instead of doubling. A non-UUID 200 from
+     authenticate had the same effect. The login cooldown and the latch were not
+     affected.
+   - **Fix:** `_call` no longer touches the store. `ShareSession.read` clears the
+     backoff only after `parse_entries` accepts the body; logins never clear it.
+   - **Moved check:** the conflicting-duplicate check moved from `newest` into
+     `parse_entries`, so a response with a conflict never counts as valid.
+   - No extra login attempt was introduced; request counts are asserted.
+2. **Deadline enforcement** (`share_client.py`):
+   - **Defect:** the deadline was checked only between reads, and `http.client`
+     loops over several socket reads inside one `read()`. Measured on `bfb4582d`
+     with a 0.5 s budget:
+     - slow-drip headers, chunked bodies, length-delimited bodies and
+       close-delimited bodies each held the request until the test's 3 s drip
+       stopped;
+     - three unanswered addresses took 1.5 s.
+   - **Extra defect, found while testing:** a body shorter than its declared
+     `Content-Length` was returned as complete. `http.client` `read(amt)` does not
+     raise on a short read.
+   - **Fix:** `urllib_poster` installs its own HTTP and HTTPS connection classes
+     through handler subclasses, so it stays on `urllib`:
+     - each resolved address gets only the remaining budget;
+     - after connect, a `threading.Timer` shuts the socket down at the deadline,
+       through a `dup()` so the TLS-wrapped socket is reached too;
+     - a request whose deadline expired fails with "request deadline exceeded",
+       even if bytes arrived;
+     - a body shorter than its `Content-Length` is a transport error;
+     - the timer is cancelled and joined in every case.
+   - **Leak check:** 40 timed-out HTTP and HTTPS requests left the open
+     file-descriptor and thread counts unchanged.
+   - **Limitation, documented:** `getaddrinfo` cannot be interrupted. A slow
+     resolver delays the request, which then fails at once. The `BoundedWorker`
+     still holds at most one job.
+3. **Schema compatibility** (`dexcom_share.py`):
+   - The five keys are required; additional fields are ignored and never read.
+   - Value, timestamp and trend validation are unchanged, and additional fields
+     never excuse a malformed required field.
+   - The connectivity check reports missing required keys and the number of
+     additional keys, never their values.
+4. **Persistence failures** (`share_state.py`):
+   - **Defect 1:** the attempt record was durable before every login, but a block
+     whose write failed lived only in memory. After a restart the service logged in
+     again 300 s later; the test reproduced this on `bfb4582d`.
+   - **Fix 1:** the attempt record now also sets `login_pending`, and the session
+     clears it once the outcome is recorded, in a `finally`. A state file still
+     showing `login_pending` at load blocks automatic login as
+     `LoginOutcomeUnknown` until an operator unblocks. A failed clearing write is
+     retried by the next valid read.
+   - **429 backoff that cannot be written:**
+     - during a login, the outcome stays unrecorded, so a restart blocks;
+     - during a read, the running process keeps it in memory, and after a restart
+       the persisted login interval bounds the first request instead.
+   - **Defect 2:** a stale `.partial` file with mode 0644 made the state file 0644,
+     and a failed rename left the partial file behind; both were reproduced.
+   - **Fix 2:** `write_state` forces 0600 with `fchmod` and removes the partial file
+     on failure, leaving the previous state intact.
+   - The state file still holds no credentials, account ids or session ids;
+     `login_pending` is a boolean.
+5. **README:** no longer says no Uno has been flashed:
+   - it records the owner-run M3 bench validation, including the watchdog test, and
+     the verified restore of the production firmware;
+   - it says only the bench harness has run on the Pi;
+   - it says nothing is connected to the Uno's pins, so the siren, bed shaker,
+     button, display and the alarm system as a whole are not validated.
+
+### Changes to existing tests
+
+None of these weakens an assertion:
+
+- `test_unknown_entry_structures_are_rejected` asserted that an extra field is
+  rejected, which finding 3 reverses. Its other cases moved into
+  `test_entries_missing_a_required_key_are_rejected`, now one case per required key,
+  and `test_entries_that_are_not_objects_are_rejected`.
+- `test_slow_and_hung_responses_end_within_the_request_deadline` now matches "deadline
+  exceeded" instead of "TimeoutError". The error class and the 2 s bound are
+  unchanged.
+- `test_login_interval_holds_within_and_across_restarts` and
+  `test_reboot_restarts_the_cooldown_from_the_new_boot` now record the attempt's
+  outcome before the simulated restart. Without it, the new latch correctly blocks;
+  that case has its own tests.
+- `test_check_describes_unexpected_shapes_without_values` asserts the new missing and
+  additional key lines.
+- `test_state_store_has_no_place_for_secrets` includes `login_pending` and checks its
+  type.
+
+### Test results
+
+- **Python 3.11.18 and 3.13.18:** ruff clean, mypy strict clean (30 files), pytest
+  595 passed. Relative to `bfb4582d`, 5 test cases were replaced
+  and 60 added.
+- **Deadline tests:** stable over 5 repeated runs and 3 runs with every CPU core busy.
+- **Firmware:** unchanged; `pio run -e uno` and `-e uno-watchdog-test` succeed, the
+  native tests pass 27 of 27, and the production hex is still `bde6b740…`.
+- **Mutation check:** 19 mutations of the new safeguards (backoff clearing, deadline
+  timer, `dup`, per-address budget, expiry reporting, declared length, login outcome
+  marker, required and additional keys, duplicate check, partial-file mode and cleanup,
+  state type check, check output). On the first run 18 failed the suite. The survivor, a
+  missing `fchmod`, exposed a test that wrote twice and so hid the defect. With the test
+  tightened to a single write, all 19 fail the suite.
+
+### Unresolved
+
+- The live-response assumptions in DEXCOM_SHARE.md still need the owner-approved
+  connectivity check.
+- A stop, crash or power loss during a login now needs an operator unblock. This is
+  the fail-closed choice: the outcome cannot be known.
+- DNS resolution remains outside the request deadline.
+
 ## 2026-11-12 — M4 Dexcom Share acquisition
 
 ### Research (before implementation)
