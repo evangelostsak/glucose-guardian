@@ -96,13 +96,37 @@ def test_malformed_entries_are_rejected(change):
         parse_entries(body(entry(**change)), 3)
 
 
-@pytest.mark.parametrize("item", [
-    {key: value for key, value in entry().items() if key != "Trend"},
-    entry(Extra=1), [], "entry", None,
-])
-def test_unknown_entry_structures_are_rejected(item):
-    with pytest.raises(ShareProtocolError, match="exactly WT"):
+@pytest.mark.parametrize("key", ["WT", "ST", "DT", "Value", "Trend"])
+def test_entries_missing_a_required_key_are_rejected(key):
+    item = {name: value for name, value in entry().items() if name != key}
+    with pytest.raises(ShareProtocolError, match=f"missing {key}"):
+        parse_entries(body(item, entry()), 3)
+
+
+@pytest.mark.parametrize("item", [[], "entry", None, 110])
+def test_entries_that_are_not_objects_are_rejected(item):
+    with pytest.raises(ShareProtocolError, match="not an object"):
         parse_entries(body(item), 3)
+
+
+EXTRA_FIELDS = {"Extra": 1, "value": 250, "Value2": 45, "Nested": {"Value": 300},
+                "List": [1, 2], "Null": None, "Text": "x" * 1000, "Huge": 10**30}
+
+
+def test_additional_entry_fields_are_ignored():
+    (plain,) = parse_entries(body(entry()), 3)
+    (extended,) = parse_entries(body(entry(**EXTRA_FIELDS)), 3)
+    assert extended == plain
+    assert (extended.mg_dl, extended.timestamp, extended.trend) == (110, AT, Trend.FLAT)
+
+
+@pytest.mark.parametrize("change", [
+    {"Value": 402}, {"Value": "110"}, {"WT": "2026-01-01T00:00:00Z"}, {"Trend": "Sideways"},
+    {"DT": None},
+])
+def test_additional_fields_never_excuse_a_malformed_required_field(change):
+    with pytest.raises(ShareProtocolError):
+        parse_entries(body(entry(**EXTRA_FIELDS) | change), 3)
 
 
 def test_trend_names_and_legacy_numbers():
