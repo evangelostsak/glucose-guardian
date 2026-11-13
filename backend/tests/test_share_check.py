@@ -48,6 +48,7 @@ def test_check_reports_structure_without_values_or_secrets(environment, simulato
     for secret in ("SingleUp", SYNTHETIC_USERNAME, SYNTHETIC_PASSWORD):
         assert secret not in output
     assert (simulator.requests["authenticate"], simulator.requests["read"]) == (1, 1)
+    assert set(simulator.requests) == {"authenticate", "login", "read"}
 
 
 def test_check_respects_the_persisted_login_interval(environment, simulator, capsys):
