@@ -1,5 +1,94 @@
 # Development log
 
+## 2026-11-13 — PR #9 design review: M5 owner decisions
+
+Documentation only: the M5 plan and the documents that reference it. No code,
+configuration, firmware or test changed. Nothing contacted Dexcom; nothing was
+deployed or flashed; no credential was touched.
+
+### Owner decisions (plan section 9)
+
+- **D1 approved:** runtime supervision is part of M5.
+- **D2:** Pillow approved; the `/dev/fb0` backend is conditional on the smoke test.
+- **D3:** Debian 13 aarch64 confirmed; desktop or headless pending.
+- **D4 approved.**
+- **D5 approved provisionally:** the LOW and HIGH encoding is not yet live-verified.
+- **D6 modified:** the last-known cutoff described below.
+- **D7:** provisional timing approved.
+- **D8:** simulated transport first; the real Uno later, under controlled conditions.
+- **D9 approved conditionally,** with a safe state migration.
+- **D10:** two implementation PRs approved.
+
+### Plan changes
+
+- **Output backend (section 3.2):**
+  - Pillow is the renderer;
+  - `/dev/fb0` is adopted only after smoke test G1 on the real panel and Pi;
+  - documented KMS/DRM risks: no emulated framebuffer, wrong size, DRM master held by
+    a compositor, pixel format, console overdraw, legacy interface;
+  - fallbacks in order: pygame on SDL2 KMS/DRM, then a direct DRM/KMS output.
+- **Accounts and permissions (section 3.6):**
+  - `glucose-guardian` runs the runtime; `glucose-guardian-display` runs the display,
+    with the supplementary groups `glucose-guardian` and `video`;
+  - an ownership and mode table for every path;
+  - the display has read-only snapshot access (directory 0750, file 0640,
+    `ReadOnlyPaths=`) and no state or credential access (modes plus
+    `InaccessiblePaths=`);
+  - no network for the display (`PrivateNetwork=yes`, `IPAddressDeny=any`, Unix
+    sockets only).
+- **Limits of `ExecStopPost=` and the watchdog:** a kernel, GPU, driver, HDMI or panel
+  freeze, a failing `ExecStopPost=`, or a power loss with the panel still powered can
+  leave a frozen frame with a value. This is a documented residual risk, not a
+  guarantee.
+- **Last-known cutoff (D6):**
+  - `last_known_cutoff_s` in `[display]`, provisionally 1800 s and greater than
+    `max_age_s`;
+  - after it, no number, only "NO CURRENT DATA";
+  - read only by the display, so the alarm engine is unchanged; tests check the
+    isolation.
+- **Login state migration (section 3.8):** an exact, verified move from
+  `~/glucose-guardian-state` to `/var/lib/glucose-guardian`.
+  - Byte-identical, mode 0600, owner changed to the service user.
+  - The same `share_state status` lines before and after.
+  - The target is never overwritten; the old file and the old configuration are
+    renamed, not deleted.
+  - The check never runs while the service is active.
+  - Nothing deletes, recreates or unblocks the state.
+- **New findings:**
+  - F7: `AuthStateStore` reads the state file once and replaces it on every change, so
+    the file allows only one writer at a time;
+  - F8: a missing state file is a fresh state with no cooldown or block.
+- **Validation:** G1, H13 (permissions) and H14 (migration) added, and the open
+  hardware questions listed. Acceptance criteria 3, 5, 6, 7 and 8 are new or changed.
+- **Implementation order:** G1 is a gate inside PR B, before the units. The Makefile
+  changes for the shared state file are in PR B step 10, and the migration procedure in
+  step 11.
+
+### Other documents
+
+- **PROJECT_STATUS:** the roadmap row, the next milestone and the blockers.
+- **ARCHITECTURE and SAFETY:** supervision is approved for M5.
+- **DEXCOM_SHARE:** a new section on moving the state file.
+- **HARDWARE:** G1 and H1 to H14.
+
+### Tests
+
+- **Python 3.11.18 and 3.13.18** (`make lint typecheck test` with `VENV` set to scratch
+  virtual environments): ruff clean, mypy strict clean (30 files), pytest 761 passed
+  on both.
+- **Links:** every relative link and anchor in the changed documents resolves.
+- **Firmware:** unchanged.
+
+### Unresolved
+
+- Desktop or headless (D3), and the G1 result.
+- The hardware questions in plan section 6: panel model and modes, framebuffer format,
+  console ownership through `TTYPath=`, what the panel shows on signal or power loss,
+  the panel's power source, touch and backlight, and late panel power-up.
+- F7: the mutual exclusion between the check and the service is a Makefile guard. A
+  file lock in `share_state` would also cover manual runs, but it changes M4 code and
+  was not proposed for this milestone.
+
 ## 2026-11-13 — M4 live validation, roadmap correction and M5 plan
 
 Documentation and planning only. No code, configuration, firmware or test changed.
