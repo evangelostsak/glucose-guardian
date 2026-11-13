@@ -71,7 +71,7 @@ def cases(cutoff_s: float) -> list[tuple[str, Snapshot | SnapshotProblem]]:
             LIVE, glucose=GlucoseLevel.UNKNOWN, glucose_current=False, mg_dl=None,
             reading_utc=None, data_age_s=None, trend=None, faults=(Fault.MISSING_DATA,),
             fault_audible=True, source_status=ShareStatus.LOGIN_DEFERRED)),
-        ("no-data-not-running", SnapshotMissing("no snapshot")),
+        ("no-data-no-recent-data", SnapshotMissing("no snapshot")),
         ("no-data-invalid", SnapshotInvalid("synthetic")),
         ("faults-and-controller", replace(LIVE, faults=(Fault.COMMUNICATION,
                                                         Fault.CONTROLLER_RESET),
