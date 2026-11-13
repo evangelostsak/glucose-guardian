@@ -91,4 +91,6 @@ Outstanding physical checks, which need components, wiring review and approval:
 - buzzer (siren) and bed-shaker electrical integration;
 - the physical button;
 - power-loss resilience and backup power;
-- the Waveshare 800×480 display.
+- the Waveshare 800×480 display: checks H1 to H12 in section 6 of the
+  [M5 plan](plans/2026-11-13-m5-hdmi-display.md#6-hardware-dependent-validation-waits-for-the-screen),
+  including the panel's power source and under-voltage.
