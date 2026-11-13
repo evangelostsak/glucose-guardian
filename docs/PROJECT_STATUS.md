@@ -210,7 +210,9 @@ of the [M5 plan](plans/2026-11-13-m5-hdmi-display.md)). Steps 1 to
   CI installs `fonts-dejavu-core`.
 - **Unchanged:** alarm policy, thresholds, acknowledgement, GG1, firmware and the M4
   login protections.
-- **Tests:** 1025 in total, 264 more than before. 19 of 19 mutations of the new
+- **Review correction (PR #10):** a missing or expired snapshot shows "NO DATA: No
+  recent display data" instead of claiming that the runtime is not running.
+- **Tests:** 1032 in total, 271 more than before PR A. 19 of 19 mutations of the new
   safety rules are caught.
 
 ## Roadmap
