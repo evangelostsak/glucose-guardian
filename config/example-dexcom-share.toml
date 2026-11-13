@@ -26,5 +26,13 @@ request_timeout_s = 5
 state_file = "/var/lib/glucose-guardian/dexcom-share-state.json"
 [transport]
 kind = "simulated"
+[display]
+kind = "snapshot"
+snapshot_file = "/run/glucose-guardian/display.json"
+snapshot_max_age_s = 5
+refresh_s = 1
+last_known_cutoff_s = 1800
+framebuffer = "/dev/fb0"
+font_file = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 [hardware]
 outputs_enabled = false
