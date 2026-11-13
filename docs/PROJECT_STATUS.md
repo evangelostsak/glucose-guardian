@@ -157,9 +157,16 @@ Share diagnostics. `make help` is the default target.
   terminal and a typed `contact dexcom`, and never retries. `dexcom-credentials`
   encrypts from a hidden prompt; credentials never pass through arguments, variables
   or the environment.
+- **State file:** `dexcom-status`, the `dexcom-check` preflight and `share_check` read
+  the path named in `DEXCOM_CONFIG`. An explicit `STATE_DIR` that disagrees is
+  refused.
+- **Credential rotation:** `dexcom-credentials-rotate CREDENTIAL=username|password`
+  replaces a credential only after a typed confirmation, the same value entered twice,
+  encryption and validation through systemd. Until then the current file stays.
+  `dexcom-credentials-check` validates the provisioned pair.
 - **CI:** now runs the same targets: `make setup lint typecheck test` and
   `make setup-firmware firmware-build firmware-test`.
-- **Tests:** 66 Makefile tests; 729 in total.
+- **Tests:** 88 Makefile tests; 761 in total.
 
 ## Next milestone
 
