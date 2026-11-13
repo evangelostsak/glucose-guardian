@@ -17,6 +17,8 @@ Keep these current after every substantial task:
 - `docs/PROTOCOL.md`: serial protocol specification shared by Pi and Uno
 - `docs/HARDWARE.md`: electrical interface assumptions and provisional firmware timing
 - `docs/BENCH.md`: USB-only Uno bench procedure, checks and pass criteria
+- `docs/DEXCOM_SHARE.md`: Dexcom Share account type, API assumptions, credential provisioning, lockout recovery, connectivity check
+- `docs/plans/`: dated milestone plans; record approved decisions and deviations in place
 - `docs/audits/`: dated audits; never rewrite a past audit's findings (link fixes only), add a new one
 
 Rename files with `git mv`; never create files that differ from an existing one only in
