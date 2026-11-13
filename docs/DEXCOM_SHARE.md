@@ -31,6 +31,16 @@ section 2.
 
 The following is implemented and tested against the synthetic simulator:
 
+- A read-only allowlist checked before every request:
+  - the three Share hosts (or the loopback simulator);
+  - only the authenticate, login and read operations;
+  - no query except the read window;
+  - only the documented body keys.
+
+  Anything else is refused without being sent. Only POST is used and redirects are
+  refused. No code path can change account settings, followers, sharing, alerts,
+  glucose records or devices.
+
 - HTTPS through `urllib` with certificate verification against the system CA store.
 - Bounds on every request:
   - a per-request deadline that covers connecting to every resolved address, the TLS
@@ -191,7 +201,8 @@ login) and one read.
 - **It never prints:** glucose values, trends, the values of additional fields,
   credentials or identifiers.
 
-It uses the same state file, login interval and latch as the service.
+It uses the same state file, login interval, latch and request allowlist as the
+service, so it can send nothing but the authenticate, login and read operations.
 
 1. On the laptop, from the reviewed branch, copy the code to the Pi:
 
