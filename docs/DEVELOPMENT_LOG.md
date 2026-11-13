@@ -1,5 +1,74 @@
 # Development log
 
+## 2026-11-13 — M4 read-only security audit
+
+Requirement: Glucose Guardian only authenticates and reads glucose. It never changes
+Dexcom account settings, followers, sharing permissions, alerts, glucose records or
+device configuration.
+
+### Findings
+
+- **Operations:** the code built only three requests: authenticate, login and read.
+  `ShareSession._call` would have sent any URL it was given, though, so the limit held
+  only by convention.
+- **HTTP method:** always POST, hard-coded in `urllib_poster`; the poster has no
+  method parameter.
+- **Redirects:** refused by `_RefuseRedirects`.
+- **Connectivity check:** reaches the network only through `ShareSession.read_raw`.
+- **Network code:** only `share_client.py` imports network client modules;
+  `service.py` imports `ssl` to build the context.
+- **Omnipod:** no Omnipod or Insulet reference exists in code, configuration,
+  deployment files or firmware.
+
+### Changes
+
+- `dexcom_share.check_request` and `ShareRequestRefused` (a `ShareProtocolError`).
+  A request is allowed only if:
+  - the server is one of the three `SERVERS` HTTPS bases, or the loopback simulator
+    `http://127.0.0.1:<port>`;
+  - the endpoint is exactly one of the three;
+  - the two login steps carry no query;
+  - the read query is exactly `sessionId` (UUID), `minutes` (1 to 1440) and
+    `maxCount` (1 to 288), in order;
+  - the JSON body has exactly the documented keys, with string values.
+- `ShareSession._call` runs the check before every request. A refused request sends
+  nothing and becomes an `acquisition` fault.
+
+### Tests
+
+- 68 new tests in `test_share_readonly.py`:
+  - the three operations on all approved servers;
+  - 15 refused endpoints, including example write and management names, path
+    traversal, case changes, fragments and encoded slashes;
+  - 10 refused servers, including plain HTTP, look-alike hosts, user-info tricks,
+    other ports and other loopback addresses;
+  - 16 refused queries and 11 refused bodies;
+  - a session for an unapproved server sends nothing;
+  - a session refuses any other operation before sending;
+  - a recording server that accepts every HTTP method receives only POST, and only
+    for the three operations;
+  - 301, 302, 303, 307 and 308 redirects are never followed;
+  - the poster has no method parameter;
+  - only `share_client.py` can open network connections.
+- `test_share_check.py` now also asserts the check reaches only the three operations.
+- **Python 3.11.18 and 3.13.18:** ruff clean, mypy strict clean (30 files), pytest 663
+  passed.
+- **Mutation check:** 8 mutations, all failing the read-only and check tests:
+  - the check not called;
+  - the redirect handler removed;
+  - an extra endpoint approved;
+  - any server approved;
+  - the body not checked;
+  - a query allowed on login;
+  - the read query not checked;
+  - a simulator pattern that accepts any host.
+
+### Unresolved
+
+- The allowlist cannot prove what Dexcom does with an approved request; it
+  guarantees only what this client sends. The live connectivity check is still
+  pending owner approval.
+
 ## 2026-11-13 — M4 review follow-up (PR #7)
 
 The first external review of PR #7, at `bfb4582d`, requested changes in five areas.
