@@ -1,5 +1,123 @@
 # Development log
 
+## 2026-11-13 — M5 PR A: offline display software
+
+Steps 1 to 7 of section 8 of the [M5 plan](plans/2026-11-13-m5-hdmi-display.md), whose
+section 11 records the details and deviations. Nothing contacted Dexcom; nothing was
+deployed or flashed; no real configuration, credential or state file was touched. PR B
+was not started.
+
+### Changes
+
+- **Step 1, trend with its reading (F1):** `Reading.trend` is a required field.
+  `DexcomShareProvider` puts the entry's trend in the `Reading`, and `latest_trend` is
+  removed. Scenario segments carry synthetic trends.
+- **Step 2, frame:** `Frame` gains `reading_time`, `trend`, `source`, `source_status`
+  and `outputs_enabled`. `build_frame` refuses a source and status that do not match.
+  The runtime builds the frame inside its display guard.
+- **Step 3, source status:** `service.Acquisition` carries the source and a status
+  callable: `DexcomShareProvider.status`, or none for simulated data. No second Dexcom
+  client or session exists.
+- **Step 4, snapshot:**
+  - `snapshot.py` provides the schema-1 atomic writer (mode 0640, at most 4096 bytes,
+    no `fsync`), the strict reader and `SnapshotDisplay`;
+  - `FanOutDisplay` is in `display.py`;
+  - the required `[display]` table is in `config.py` and both examples;
+  - `service.build_display` refuses a missing snapshot directory with status 2.
+- **Step 5, screen model:** `screen_model.py` classifies a snapshot into LIVE, LAST
+  KNOWN, NO CURRENT DATA (provisional cutoff 1800 s) or NO DATA. Freshness is
+  recomputed on the monotonic clock. It also builds the connection line, reasons,
+  alerts, markers and the clock.
+- **Step 6, renderer:** `screen_render.py` draws the 800×480 dashboard with Pillow
+  and DejaVu Sans Bold: fit-to-box text, polygon arrows and fixed layout boxes.
+  `preview.py` and `make display-preview` write 31 synthetic PNGs.
+- **Step 7, display process:** `screen.py` provides the refresh loop, redraw on
+  change, PNG output, `--blank`, signal handling and systemd notifications through the
+  new `notify.py`.
+- **Dependencies and CI:** `pillow==13.0.0`. CI installs `fonts-dejavu-core` before
+  `make setup`.
+- **Docs:** the M5 plan (status, sections 11 and 12, D3, open items), ARCHITECTURE
+  (modules, `[display]`, a new *Display* section), SAFETY (seven display rows),
+  PROJECT_STATUS, README, DEXCOM_SHARE (`[display]` table and the effect on the Pi's
+  existing configuration).
+
+### Decisions
+
+- **One source for the snapshot path:** the display process loads the same
+  configuration as the runtime.
+- **Stricter acceptance:** a snapshot from another source or outputs setting than the
+  display's configuration counts as invalid, so it shows as NO DATA.
+- **LAST KNOWN layout:** after reviewing the previews, the age moved into the tag and
+  the retained alarm level got a full-width row (deviation 2 in plan section 11).
+- **Development snapshot:** `config/example.toml` writes it to
+  `/tmp/glucose-guardian-display.json`. `harness.write_config` redirects it into each
+  test's temporary directory, so tests never touch a shared path.
+- **Pi inspection (owner-reported, recorded in plan section 12.1):** headless,
+  `/dev/fb0` absent, DRM devices present. The architecture is unchanged; G1 decides the
+  output step.
+- **Cross-process lock:** the lock for the Dexcom login state is specified in plan
+  section 12.2 as a mandatory PR B prerequisite and was not implemented: no PR A
+  component needs it.
+
+### Tests
+
+- **New:**
+  - `test_trend.py` (15): F1 regressions for stale and future-dated entries, scenario
+    trends, and identical alarm results with and without trends in all 11 scenarios;
+  - `test_snapshot.py` (71);
+  - `test_screen_model.py` (57, including an invariant check over more than 1000
+    snapshots);
+  - `test_screen_render.py` (80);
+  - `test_screen.py` (12, including an end-to-end run with the real service: killing
+    the runtime shows NO DATA within `snapshot_max_age_s + refresh_s` plus margin,
+    recovery after a restart, killing the display leaves the runtime writing, and the
+    display modules load no Dexcom client, credentials, state or network modules);
+  - `test_preview.py` (3).
+- **Updated:**
+  - `test_config.py`: `[display]` cases;
+  - `test_display.py`;
+  - `test_service.py`: build_display, the missing snapshot directory, a simulated
+    snapshot;
+  - `test_share_runtime.py`: the trend stays with its reading through the Share
+    simulator;
+  - `test_share_readonly.py`: `notify.py` in the network allowlist, Unix sockets only;
+  - `test_makefile.py`: `display-preview`;
+  - the existing `Reading` constructions.
+- **Python 3.11.18 and 3.13.18** (`make lint typecheck test` with `VENV` set to
+  scratch virtual environments with `pillow==13.0.0`): ruff clean, mypy strict clean
+  (36 files), pytest 1025 passed on both (761 before).
+- **Firmware:** `make firmware-test` 27 of 27; firmware unchanged and not rebuilt.
+- **Mutation check:** 19 of 19 mutations fail the tests:
+  - the frame taking the newest instead of the last valid reading;
+  - dropping the `max_age_s` recheck, the cutoff, the snapshot expiry or the
+    future-write check;
+  - a colored or trended LAST KNOWN;
+  - dropping the no-response rule or the "<40" mapping;
+  - snapshot mode 0644, or no `fchmod`;
+  - dropping the source and status consistency, `O_NOFOLLOW` or the size bound;
+  - a fan-out that stops at the first failure;
+  - a watchdog ping before the render;
+  - the renderer drawing a non-live value in the live layout (a survivor of the first
+    run, now caught by a LAST KNOWN label test);
+  - dropping the cutoff configuration check;
+  - the Share provider dropping the trend.
+- **Previews:** `make display-preview` wrote 31 PNGs to `build/display-preview/`, all
+  synthetic, and they were reviewed visually.
+- **Development machine:** about 3 ms per rendered frame and 76 MiB peak memory.
+
+### Unresolved
+
+- **PR B prerequisites** (plan section 12):
+  - the cross-process lock;
+  - G1 on the real panel, with `/dev/fb0` currently absent;
+  - the `[display]` table in the Pi's `config/local.dexcom.toml`. Until it is added,
+    `make dexcom-status` and `make dexcom-check` stop with a configuration error;
+  - `fonts-dejavu-core` on the Pi.
+- **Frozen frames:** a kernel, GPU, driver, HDMI or panel freeze can keep the last
+  frame on the panel (residual risk).
+- **The working tree's `.venv`** (Python 3.14.4) still lacks the lint tools and
+  Pillow. `make setup` will install Pillow there.
+
 ## 2026-11-13 — PR #9 design review: M5 owner decisions
 
 Documentation only: the M5 plan and the documents that reference it. No code,
