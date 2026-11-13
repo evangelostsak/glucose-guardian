@@ -67,7 +67,7 @@ SIMULATION = ("Source: simulation", Tone.MUTED)
 NO_DATA = "NO DATA"
 NO_CURRENT_DATA = "NO CURRENT DATA"
 LAST_KNOWN = "LAST KNOWN"
-NOT_RUNNING = "Glucose Guardian is not running"
+NO_RECENT_DATA = "No recent display data"
 INVALID = "Display data invalid"
 WAITING = "Waiting for the first reading"
 NO_CURRENT = "No current reading"
@@ -111,7 +111,7 @@ def classify(result: Snapshot | SnapshotProblem, *, settings: ScreenSettings,
              now_monotonic: float, now_local: datetime) -> ScreenModel:
     clock = now_local.strftime("%H:%M")
     if isinstance(result, SnapshotProblem):
-        return no_data(NOT_RUNNING if isinstance(result, SnapshotMissing) else INVALID,
+        return no_data(NO_RECENT_DATA if isinstance(result, SnapshotMissing) else INVALID,
                        settings=settings, clock=clock)
     snapshot = result
     elapsed_s = now_monotonic - snapshot.written_monotonic_s
@@ -119,7 +119,7 @@ def classify(result: Snapshot | SnapshotProblem, *, settings: ScreenSettings,
             or snapshot.outputs_enabled is not settings.outputs_enabled:
         return no_data(INVALID, settings=settings, clock=clock)
     if elapsed_s > settings.snapshot_max_age_s:
-        return no_data(NOT_RUNNING, settings=settings, clock=clock)
+        return no_data(NO_RECENT_DATA, settings=settings, clock=clock)
     connection, connection_tone = _connection(snapshot)
     age_s = None if snapshot.data_age_s is None else snapshot.data_age_s + elapsed_s
     mg_dl = snapshot.mg_dl
