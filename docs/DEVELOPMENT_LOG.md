@@ -1,5 +1,46 @@
 # Development log
 
+## 2026-11-13 — PR #10 review: neutral wording for missing or expired snapshots
+
+### Change
+
+- **Wording:** `screen_model` showed "Glucose Guardian is not running" for a missing or
+  expired snapshot. The display process cannot know that: the runtime may have
+  stopped, stalled or crashed, or lost its snapshot directory, or may still be
+  starting. Both cases now show "NO DATA: No recent display data" (`NO_RECENT_DATA`).
+- **Unchanged:** the NO DATA state, the suppressed value, trend, level, age and
+  connection line, and the thresholds (`snapshot_max_age_s`, written-in-the-future).
+- **Preview:** the case was renamed `no-data-no-recent-data`.
+- **Test helper:** the end-to-end helper `expect()` read stderr with a blocking
+  `readline()`, so a log line that never came hung the test instead of failing it. It
+  was found when the new tests were run against the old wording. Output is now read on
+  a thread into a queue with a real deadline, and a new test proves that a missing
+  line fails within its timeout.
+- **Docs:** the M5 plan (sections 3.1, 3.4, 3.6 and 4, and the review correction in
+  section 11), SAFETY and PROJECT_STATUS.
+
+### Specification check
+
+Compared mechanically with the approved plan:
+
+- the snapshot fields equal the 18 fields of section 3.3;
+- all ten connection texts equal the table in section 3.4;
+- the `[display]` keys equal section 3.7;
+- every marker and state headline is present.
+
+### Tests
+
+- **New:**
+  - `test_missing_or_expired_snapshot_shows_no_recent_data_without_claiming_a_stop`
+    (5 cases: missing; expired by 1 ms and by an hour; an expired falling urgent low;
+    an expired last-known reading with a blocked login);
+  - `test_no_screen_claims_to_know_the_runtime_stopped` (every status and age);
+  - `test_expect_fails_in_time_when_a_line_never_comes`.
+- **Updated:** the expiry-boundary, no-data, loop and end-to-end tests.
+- **Against the old wording:** 11 tests fail, none hang.
+- **Python 3.11.18 and 3.13.18** (`make lint typecheck test`): ruff clean, mypy strict
+  clean (36 files), pytest 1032 passed on both.
+
 ## 2026-11-13 — M5 PR A: offline display software
 
 Steps 1 to 7 of section 8 of the [M5 plan](plans/2026-11-13-m5-hdmi-display.md), whose
