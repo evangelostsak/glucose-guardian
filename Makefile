@@ -16,6 +16,7 @@ PI_DIR := glucose-guardian
 SERIAL_PORT :=
 VARIANT :=
 CONFIRM :=
+CREDENTIAL :=
 SIMULATOR_PORT := 8765
 SHARE_SCENARIO := normal
 DEXCOM_CONFIG := $(ROOT)/config/local.dexcom.toml
@@ -27,7 +28,6 @@ VENV_DIR := $(abspath $(VENV))
 VPY := $(VENV_DIR)/bin/python
 CONFIG_FILE := $(abspath $(CONFIG))
 DEXCOM_CONFIG_FILE := $(abspath $(DEXCOM_CONFIG))
-STATE_FILE := $(abspath $(STATE_DIR))/dexcom-share-state.json
 CREDENTIAL_USERNAME := $(CREDENTIALS_DIR)/dexcom-username.cred
 CREDENTIAL_PASSWORD := $(CREDENTIALS_DIR)/dexcom-password.cred
 PIO_PATH := PATH="$(VENV_DIR)/bin:$$PATH"
@@ -45,6 +45,14 @@ need_module = $(VPY) -c 'import $(1)' 2>/dev/null || { echo "$(1) is not install
 need_pio = $(PIO_PATH) command -v pio >/dev/null || { echo "pio not found in $(VENV_DIR)/bin or on PATH: run make setup-firmware" >&2; exit 2; }
 need_tty = test -t 0 || { echo "$(1) needs an interactive terminal; nothing was done" >&2; exit 2; }
 confirm = read -r -p '$(1) ' answer && test "$$answer" = '$(2)' || { echo "cancelled: nothing was done" >&2; exit 1; }
+STATE_PATH = $(VPY) -m glucose_guardian.share_state --config $(DEXCOM_CONFIG_FILE) path
+need_dexcom_config = test -f $(DEXCOM_CONFIG_FILE) || { echo "$(DEXCOM_CONFIG_FILE) not found: run make dexcom-config" >&2; exit 2; }
+check_state_dir = $(if $(filter-out file,$(origin STATE_DIR)),state=$$($(STATE_PATH)) || exit 2; \
+	[ "$$(dirname "$$state")" = '$(abspath $(STATE_DIR))' ] || { echo "STATE_DIR=$(abspath $(STATE_DIR)) does not match $(DEXCOM_CONFIG_FILE) (state in $$(dirname "$$state")); the state file always comes from DEXCOM_CONFIG" >&2; exit 2; },true)
+need_credentials = sudo test -f $(CREDENTIAL_USERNAME) && sudo test -f $(CREDENTIAL_PASSWORD) || { echo "credentials missing in $(CREDENTIALS_DIR): run make dexcom-credentials" >&2; exit 2; }
+validate_credentials = sudo systemd-run --pipe --wait --uid=$$(id -u) --gid=$$(id -g) \
+	-p LoadCredentialEncrypted=dexcom-username:$(1) -p LoadCredentialEncrypted=dexcom-password:$(2) \
+	$(VPY) -m glucose_guardian.credentials
 check_pi = [[ '$(PI_USER)' =~ ^[A-Za-z0-9._-]+$$ && '$(PI_HOST)' =~ ^[A-Za-z0-9._-]+$$ ]] || { echo "PI_USER and PI_HOST may contain only letters, digits, '.', '_' and '-'" >&2; exit 2; }; \
 	[[ '$(PI_DIR)' =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]*$$ && '$(PI_DIR)' != *..* ]] || { echo "PI_DIR must be a plain directory under the Pi user's home, not '$(PI_DIR)'" >&2; exit 2; }
 
@@ -53,13 +61,14 @@ check_pi = [[ '$(PI_USER)' =~ ^[A-Za-z0-9._-]+$$ && '$(PI_HOST)' =~ ^[A-Za-z0-9.
 	bench-setup bench-discover bench-bootloader bench-run bench-run-interactive bench-watchdog bench-collect \
 	simulator simulate \
 	status pi-sync pi-setup pi-status \
-	dexcom-config dexcom-credentials dexcom-status dexcom-check \
+	dexcom-config dexcom-credentials dexcom-credentials-check dexcom-credentials-rotate \
+	dexcom-status dexcom-check \
 	clean
 
 ##@ Help
 help: ## Show the targets, where each runs, and the variables
 	@echo "Glucose Guardian. [laptop]: development machine. [Pi]: Raspberry Pi with the Uno on USB."
-	@awk 'BEGIN { FS = ":.*## " } /^##@ / { printf "\n%s\n", substr($$0, 5) } /^[a-z][a-z0-9-]*:.*## / { printf "  %-22s %s\n", $$1, $$2 }' $(ROOT)/Makefile
+	@awk 'BEGIN { FS = ":.*## " } /^##@ / { printf "\n%s\n", substr($$0, 5) } /^[a-z][a-z0-9-]*:.*## / { printf "  %-26s %s\n", $$1, $$2 }' $(ROOT)/Makefile
 	@printf '\nVariables (current value; override on the command line)\n'
 	@printf '  %-16s %s\n' \
 		PYTHON '$(PYTHON)' VENV '$(VENV_DIR)' CONFIG '$(CONFIG_FILE)' \
@@ -69,8 +78,10 @@ help: ## Show the targets, where each runs, and the variables
 		SERIAL_PORT '$(if $(SERIAL_PORT),$(SERIAL_PORT),(not set; a /dev/serial/by-id/... link; required by bench and flash targets))' \
 		VARIANT '$(if $(VARIANT),$(VARIANT),(not set; production or watchdog-test; required by firmware-flash))' \
 		SIMULATOR_PORT '$(SIMULATOR_PORT)' SHARE_SCENARIO '$(SHARE_SCENARIO)' \
-		DEXCOM_CONFIG '$(DEXCOM_CONFIG_FILE)' STATE_DIR '$(abspath $(STATE_DIR))' \
-		CREDENTIALS_DIR '$(CREDENTIALS_DIR)'
+		DEXCOM_CONFIG '$(DEXCOM_CONFIG_FILE)' \
+		STATE_DIR '$(abspath $(STATE_DIR)) (only for creating DEXCOM_CONFIG; the state file always comes from it)' \
+		CREDENTIALS_DIR '$(CREDENTIALS_DIR)' \
+		CREDENTIAL '$(if $(CREDENTIAL),$(CREDENTIAL),(not set; username or password; required by dexcom-credentials-rotate))'
 
 ##@ Development [laptop]
 $(VPY):
@@ -173,7 +184,9 @@ status: ## [Pi or laptop] Read-only host report: OS, Python, clock sync, venv, t
 	@for tool in make rsync avrdude systemd-run systemd-creds systemd-ask-password; do echo "$$tool: $$(command -v $$tool || echo missing)"; done
 	@if [ -f $(ROOT)/bench/out/SHA256SUMS ]; then echo "staged images: build $$(cat $(ROOT)/bench/out/BUILD-COMMIT)"; else echo "staged images: none"; fi
 	@if [ -f $(DEXCOM_CONFIG_FILE) ]; then echo "dexcom config: $(DEXCOM_CONFIG_FILE)"; else echo "dexcom config: missing (make dexcom-config)"; fi
-	@if [ -f $(STATE_FILE) ]; then echo "dexcom state: $(STATE_FILE)"; else echo "dexcom state: none yet"; fi
+	@if [ -x $(VPY) ] && [ -f $(DEXCOM_CONFIG_FILE) ] && state=$$($(STATE_PATH) 2>/dev/null); then \
+		if [ -f "$$state" ]; then echo "dexcom state: $$state"; else echo "dexcom state: none yet ($$state)"; fi; \
+	else echo "dexcom state: unknown (needs the venv and a loadable DEXCOM_CONFIG)"; fi
 	@if ! sudo -n true 2>/dev/null; then echo "dexcom credentials: not checked (sudo needs a password)"; \
 	elif sudo -n test -f $(CREDENTIAL_USERNAME) && sudo -n test -f $(CREDENTIAL_PASSWORD); then echo "dexcom credentials: provisioned in $(CREDENTIALS_DIR)"; \
 	else echo "dexcom credentials: missing (make dexcom-credentials)"; fi
@@ -202,10 +215,14 @@ pi-status: ## [laptop] Run make status on the Pi over SSH (read-only)
 	ssh $(PI_TARGET) 'cd $(PI_DIR) && make status'
 
 ##@ Dexcom Share [Pi] (read-only; see docs/DEXCOM_SHARE.md)
-dexcom-config: ## Create STATE_DIR (0700) and DEXCOM_CONFIG from the example; an existing config is kept
-	install -d -m 0700 $(abspath $(STATE_DIR))
+dexcom-config: ## Create DEXCOM_CONFIG with its state in STATE_DIR (0700); an existing config is kept and must match an explicit STATE_DIR
+	@$(need_venv)
 	@if [ -e $(DEXCOM_CONFIG_FILE) ]; then echo "$(DEXCOM_CONFIG_FILE) exists; kept"; \
-	else sed 's|/var/lib/glucose-guardian|$(abspath $(STATE_DIR))|' $(ROOT)/config/example-dexcom-share.toml > $(DEXCOM_CONFIG_FILE); echo "wrote $(DEXCOM_CONFIG_FILE)"; fi
+	else install -d -m 0700 $(abspath $(STATE_DIR)); \
+		sed 's|/var/lib/glucose-guardian|$(abspath $(STATE_DIR))|' $(ROOT)/config/example-dexcom-share.toml > $(DEXCOM_CONFIG_FILE); \
+		echo "wrote $(DEXCOM_CONFIG_FILE)"; fi
+	@$(check_state_dir)
+	@state=$$($(STATE_PATH)); install -d -m 0700 "$$(dirname "$$state")"; echo "state file: $$state"
 
 dexcom-credentials: ## Encrypt the publisher username and password with systemd-creds from a hidden prompt; existing files are kept
 	@$(call need_tool,systemd-creds,needs systemd 250 or newer)
@@ -215,24 +232,62 @@ dexcom-credentials: ## Encrypt the publisher username and password with systemd-
 	sudo install -d -m 0700 $(CREDENTIALS_DIR)
 	@for name in username password; do \
 		file=$(CREDENTIALS_DIR)/dexcom-$$name.cred; \
-		if sudo test -f "$$file"; then echo "$$file exists; kept (delete it first to replace it)"; continue; fi; \
+		if sudo test -f "$$file"; then echo "$$file exists; kept (replace it with make dexcom-credentials-rotate CREDENTIAL=$$name)"; continue; fi; \
 		if systemd-ask-password -n "Dexcom Share $$name:" | sudo systemd-creds encrypt --name=dexcom-$$name - "$$file.new"; then \
 			sudo chmod 0600 "$$file.new"; sudo mv "$$file.new" "$$file"; echo "$$file written"; \
 		else sudo rm -f "$$file.new"; echo "encrypting dexcom-$$name failed; nothing was kept" >&2; exit 1; fi; \
 	done
 
-dexcom-status: ## Show the persisted login state (block, last attempt, backoff); never contacts Dexcom
+dexcom-credentials-check: ## Decrypt both credentials through systemd and check their format; never contacts Dexcom
 	@$(need_venv)
-	$(VPY) -m glucose_guardian.share_state --state-file $(STATE_FILE) status
+	@$(call need_tool,systemd-run,needs systemd)
+	sudo -v
+	@$(need_credentials)
+	$(call validate_credentials,$(CREDENTIAL_USERNAME),$(CREDENTIAL_PASSWORD))
+
+dexcom-credentials-rotate: ## Replace CREDENTIAL=username|password: typed twice, encrypted, validated, then swapped in (typed confirmation)
+	$(call require,CREDENTIAL,password)
+	@case '$(CREDENTIAL)' in username|password) ;; *) echo "CREDENTIAL must be username or password" >&2; exit 2 ;; esac
+	@$(need_venv)
+	@$(call need_tool,systemd-creds,needs systemd 250 or newer)
+	@$(call need_tool,systemd-ask-password,needs systemd)
+	@$(call need_tool,systemd-run,needs systemd)
+	@$(call need_tty,dexcom-credentials-rotate)
+	sudo -v
+	@$(need_credentials)
+	@echo "This replaces $(CREDENTIALS_DIR)/dexcom-$(CREDENTIAL).cred. The current file stays in place until the new"
+	@echo "value has been typed twice, encrypted and validated through systemd. Nothing is sent to Dexcom."
+	@$(call confirm,Type "replace dexcom-$(CREDENTIAL)" to continue:,replace dexcom-$(CREDENTIAL))
+	@current=$(CREDENTIALS_DIR)/dexcom-$(CREDENTIAL).cred; new="$$current.new"; \
+	trap 'sudo rm -f "$$new"' EXIT; \
+	first=$$(systemd-ask-password -n "New Dexcom Share $(CREDENTIAL):"); \
+	second=$$(systemd-ask-password -n "New Dexcom Share $(CREDENTIAL) again:"); \
+	if [ "$$first" != "$$second" ]; then echo "the two entries differ; dexcom-$(CREDENTIAL) is unchanged" >&2; exit 1; fi; \
+	unset second; \
+	printf '%s' "$$first" | sudo systemd-creds encrypt --name=dexcom-$(CREDENTIAL) - "$$new"; \
+	unset first; \
+	sudo chmod 0600 "$$new"; \
+	if [ '$(CREDENTIAL)' = username ]; then user="$$new"; pass=$(CREDENTIAL_PASSWORD); else user=$(CREDENTIAL_USERNAME); pass="$$new"; fi; \
+	$(call validate_credentials,"$$user","$$pass") \
+		|| { echo "validation failed; dexcom-$(CREDENTIAL) is unchanged" >&2; exit 1; }; \
+	sudo mv -f "$$new" "$$current"; \
+	echo "dexcom-$(CREDENTIAL) replaced. If make dexcom-status shows a block, follow 'Recovering from a blocked login' in docs/DEXCOM_SHARE.md."
+
+dexcom-status: ## Show the login state from the state file named in DEXCOM_CONFIG; never contacts Dexcom
+	@$(need_venv)
+	@$(need_dexcom_config)
+	@$(check_state_dir)
+	$(VPY) -m glucose_guardian.share_state --config $(DEXCOM_CONFIG_FILE) status
 
 dexcom-check: ## ONE read-only connectivity check (authenticate, login, read) after typed confirmation; never retried
 	@$(need_venv)
-	@test -f $(DEXCOM_CONFIG_FILE) || { echo "$(DEXCOM_CONFIG_FILE) not found: run make dexcom-config" >&2; exit 2; }
+	@$(need_dexcom_config)
+	@$(check_state_dir)
 	@$(call need_tool,systemd-run,needs systemd)
 	@$(call need_tty,dexcom-check)
 	sudo -v
-	@sudo test -f $(CREDENTIAL_USERNAME) && sudo test -f $(CREDENTIAL_PASSWORD) || { echo "credentials missing in $(CREDENTIALS_DIR): run make dexcom-credentials" >&2; exit 2; }
-	@$(VPY) -m glucose_guardian.share_state --state-file $(STATE_FILE) status
+	@$(need_credentials)
+	@$(VPY) -m glucose_guardian.share_state --config $(DEXCOM_CONFIG_FILE) status
 	@echo "This sends ONE authenticate, ONE login and ONE read request to Dexcom Share."
 	@echo "It only reads; it changes nothing on the account and is never retried."
 	@echo "A rejected login counts toward Dexcom's lockout and blocks automatic login."
