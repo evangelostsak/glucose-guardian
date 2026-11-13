@@ -133,7 +133,12 @@ synthetic data only. No live Dexcom request has been made. See
   (`share_check`) and `share_state status/unblock`.
 - **Configuration:** owner decisions `ous`, 60 s polling, 600 s maximum age, 300 s
   login interval; the rate-limit values (120 s to 1800 s) are provisional.
-- **Tests:** 212 M4 tests, 595 in total. No alarm policy, threshold, GG1, firmware or
+- **Read-only audit (2026-11-13):** `dexcom_share.check_request`, an explicit
+  allowlist, is now checked before every request. It covers the three Share hosts, the
+  authenticate, login and read operations, the read query and the documented bodies.
+  Only POST is sent, redirects are refused, and only `share_client.py` can open network
+  connections.
+- **Tests:** 280 M4 tests, 663 in total. No alarm policy, threshold, GG1, firmware or
   output change.
 - **Review follow-up (2026-11-13):** the first external review of PR #7, at
   `bfb4582d`, requested changes. All five findings are resolved and the
