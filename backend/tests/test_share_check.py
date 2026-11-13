@@ -71,10 +71,24 @@ def test_check_describes_unexpected_shapes_without_values(environment, simulator
                              {"WT": "Date(1)", "Value": 38, "Trend": "Sideways"}]
     assert share_check.main(["--config", str(environment)]) == share_check.EXIT_FAILED
     output = capsys.readouterr().out
-    assert "key set differs" in output
+    assert "entry 0: additional keys ignored: 1" in output
+    assert "entry 1: missing required keys ['DT', 'ST']" in output
     assert "Value is an integer from 39 to 401: no" in output
     assert "Trend recognized: no" in output and "parser: rejected" in output
     assert re.search(rf"\b({VALUE}|38)\b", output) is None
+
+
+def test_check_accepts_additional_fields_without_printing_them(environment, simulator,
+                                                              capsys):
+    simulator.raw_entries = [share_entry(synthetic(VALUE, START - timedelta(seconds=90),
+                                                   "Flat"))
+                             | {"Extra": 913, "Note": "synthetic-metadata"}]
+    assert share_check.main(["--config", str(environment)]) == share_check.EXIT_OK
+    output = capsys.readouterr().out
+    assert "entry 0: additional keys ignored: 2" in output
+    assert "missing required keys" not in output and "parser: accepted" in output
+    assert re.search(rf"\b({VALUE}|913)\b", output) is None
+    assert "synthetic-metadata" not in output
 
 
 def test_describe_handles_non_list_and_non_json():
