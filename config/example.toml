@@ -21,6 +21,14 @@ clock_check_timeout_s = 5
 scenario = "normal"
 [transport]
 kind = "simulated"
+[display]
+kind = "snapshot"
+snapshot_file = "/tmp/glucose-guardian-display.json"
+snapshot_max_age_s = 5
+refresh_s = 1
+last_known_cutoff_s = 1800
+framebuffer = "/dev/fb0"
+font_file = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 [hardware]
 outputs_enabled = false
 # Serial path, GPIO pins, driver ratings and wiring remain unassigned.
