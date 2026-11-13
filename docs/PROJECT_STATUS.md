@@ -5,8 +5,9 @@ Updated: 2026-11-12
 ## Current implementation
 
 `main` holds the initial scaffold and repository audit (PR #1), M0 housekeeping
-(PR #2), M1 alarm policy v2 (PR #3), M2 simulated end-to-end runtime (PR #4) and M3
-serial protocol v1 (PR #5). CI
+(PR #2), M1 alarm policy v2 (PR #3), M2 simulated end-to-end runtime (PR #4), M3
+serial protocol v1 (PR #5), and the USB bench tooling with its hardware validation
+(PR #6). CI
 runs ruff, strict mypy and pytest on Python 3.11 and 3.13 plus the Uno build. `main` is
 protected and requires one approving review; status checks are deliberately not
 required.
@@ -50,7 +51,7 @@ M3 serial protocol v1 (merged in PR #5; hardware bench validation below):
 
 This resolves audit findings H3, H6, M1, M7, L3 and L4.
 
-USB-only bench tooling is complete on `feat/bench-harness` ([BENCH.md](BENCH.md)):
+USB-only bench tooling (merged in PR #6, [BENCH.md](BENCH.md)):
 
 - `python -m glucose_guardian.bench` (`discover`, `run`, `watchdog`, `bootloader`,
   `authorize-watchdog`, `flash-record`) built on the production protocol, link, transport and runtime
@@ -74,7 +75,7 @@ USB-only bench tooling is complete on `feat/bench-harness` ([BENCH.md](BENCH.md)
   - the record is intact.
   Each flash deletes the previous record before avrdude runs.
 
-Optiboot 4.4 reset-cause workaround, also on `feat/bench-harness`:
+Optiboot 4.4 reset-cause workaround (PR #6):
 
 - Optiboot 4.4 clears MCUSR before the sketch starts, so reset flags are always empty.
 - The firmware runs a two-stage watchdog (1 s interrupt, then 1 s reset). The
@@ -104,13 +105,41 @@ The physical alarm system is not validated. NOT TESTED on this bench by design: 
 Uno's link-lost alarm output, the siren and bed shaker, the button, power-loss
 resilience and the display.
 
+M4 Dexcom Share acquisition is implemented on `feat/m4-dexcom-share` and tested with
+synthetic data only. No live Dexcom request has been made. See
+[DEXCOM_SHARE.md](DEXCOM_SHARE.md) and the updated
+[plan](plans/2026-11-07-m4-dexcom-share.md).
+
+- **Account:** read-only access through the publisher account. Current pydexcom and
+  Nightscout clients show the API has no follower login. No account, invitation or
+  follower was created or changed.
+- **Client:** HTTPS through stdlib `urllib` with certificate verification, a deadline
+  on every request, a 64 KiB body cap, refused redirects, ignored proxies and no hidden
+  retries.
+- **Login protection,** persisted without secrets across restarts:
+  - at least 300 s between login attempts;
+  - backoff on HTTP 429;
+  - a latch on rejected credentials or lockout, cleared only by an operator;
+  - a 300 s wait for the first login after a reboot.
+- **Parsing:** exact entry keys, the `WT` reading time, values from 39 (LOW) to 401
+  (HIGH) through the unchanged thresholds, and newest-wins handling of duplicates and
+  out-of-order entries. The trend is kept for M5; `DexcomShareProvider.status` tells a
+  blocked login apart from an outage.
+- **Supporting tools:** a synthetic Share simulator, a read-only connectivity check
+  (`share_check`) and `share_state status/unblock`.
+- **Configuration:** owner decisions `ous`, 60 s polling, 600 s maximum age, 300 s
+  login interval; the rate-limit values (120 s to 1800 s) are provisional.
+- **Tests:** 157 new, 540 in total. No alarm policy, threshold, GG1, firmware or output
+  change.
+
 ## Next milestone
 
-- **Review and merge of `feat/bench-harness`:** bench tooling, flash safety checks,
-  the reset-cause workaround and the validation record.
-- **M4 Dexcom Share adapter:** an implementation plan is proposed for review on its own
-  branch, `docs/m4-dexcom-share-plan`. Implementation starts only after this branch is
-  reviewed and the plan and its owner decisions are approved.
+- **Review of M4** (`feat/m4-dexcom-share`).
+- **The owner-approved read-only connectivity check** with the publisher credentials
+  ([DEXCOM_SHARE.md](DEXCOM_SHARE.md)). It confirms the endpoints, the response shape,
+  `WT` and `DT` agreement, and the trend format. Then a soak with outputs disabled.
+- **M5 display:** data age, faults and the Share status, including blocked
+  authentication.
 
 ## Known blockers and gaps
 
@@ -125,12 +154,16 @@ resilience and the display.
   reconnects, because opening the port resets the Uno again.
 - A restart forgets a retained alarm level during stale data (glucose becomes unknown
   while the missing-data fault sounds). Persisting it is an open M6 item.
-- The systemd clock check has not been run on the Pi; the simulated service takes
-  clock status from the scenario.
+- The systemd clock check has not been run on the Pi; the Dexcom provider depends on
+  it.
+- Dexcom Share is undocumented and has not been contacted. The response shape, the LOW
+  and HIGH encoding, the session lifetime and the rate-limit behavior are assumptions
+  until the connectivity check and real LOW or HIGH events confirm them.
+- The publisher credentials on the Pi are protected only by the host key on the same
+  SD card (no TPM).
 - Electrical drivers, backup power, GPIO mappings, button wiring and Uno power topology
   are unselected.
 - Physical outputs and button input require reviewed wiring and explicit approval.
-- Real Dexcom access is intentionally deferred; no credentials are configured.
 - GUI and systemd installation are absent.
 - Remaining audit findings: H5 (hardware review); M6 (M6); M9 (M5/M6); L5, and L6's
   heartbeat timeout defined separately on the Pi and the Uno.
