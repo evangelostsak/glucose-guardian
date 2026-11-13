@@ -1,5 +1,107 @@
 # Development log
 
+## 2026-11-13 — PR #8 review: state-file source and credential rotation
+
+### 1. One state file, named by `DEXCOM_CONFIG`
+
+**Before:**
+
+- `dexcom-status` and the `dexcom-check` preflight read
+  `$(STATE_DIR)/dexcom-share-state.json`.
+- `share_check` read the `state_file` in `DEXCOM_CONFIG`.
+- An overridden `STATE_DIR`, or an edited configuration, made the preflight inspect a
+  different file from the one the check used.
+
+**Changes:**
+
+- **`share_state` command line:** `--config` resolves the state file with the
+  application's config loader, as an alternative to `--state-file`. Exactly one of
+  the two is required. A new `path` command prints the resolved path, and `status`
+  now prints `state file: <path>` first. A configuration without Dexcom settings, or
+  one that cannot be read, exits with status 2.
+- **Makefile:**
+  - `dexcom-status`, the `dexcom-check` preflight and `status` use `share_state
+    --config $(DEXCOM_CONFIG)`.
+  - `STATE_DIR` is used only to create a configuration.
+  - When `STATE_DIR` is overridden, `dexcom-status`, `dexcom-check` and
+    `dexcom-config` refuse with status 2 if it differs from the configuration's state
+    directory. They refuse before any `sudo` call or file creation.
+  - `dexcom-config` keeps an existing configuration and creates and reports its state
+    directory.
+
+### 2. Credential rotation
+
+**Before:** `dexcom-credentials` kept existing files and advised deleting one to
+replace it, which removed the working credential before a replacement existed.
+
+**Changes:**
+
+- **`python -m glucose_guardian.credentials`:** a validator that loads both credentials
+  from `$CREDENTIALS_DIRECTORY` with the existing loader. It reports only valid or
+  invalid, and the reason; never a value.
+- **`dexcom-credentials-check`:** runs the validator through `sudo systemd-run` with
+  `LoadCredentialEncrypted=` for both files, the same mechanism the connectivity check
+  uses. It never contacts Dexcom.
+- **`dexcom-credentials-rotate CREDENTIAL=username|password`** proceeds in this order:
+  1. It requires a terminal, provisioned credentials, and the typed confirmation
+     `replace dexcom-<name>`.
+  2. It reads the new value twice from hidden prompts into unexported shell variables,
+     and stops if the two differ.
+  3. It pipes the value through the `printf` builtin into `systemd-creds encrypt` as
+     `<file>.new`.
+  4. It validates `<file>.new` with the other current credential through systemd.
+  5. Only then does it rename `<file>.new` over the current file.
+  6. An `EXIT` trap removes `<file>.new` on any failure.
+- **Never automatic:** the rotation never contacts Dexcom and never unblocks.
+  `docs/DEXCOM_SHARE.md` describes the rotation and the recovery.
+- **Unchanged:** the existing targets, confirmation gates, read-only restrictions and
+  firmware safeguards.
+
+### Tests
+
+- **`test_share_state.py`, 5 new tests:** `--config` resolution and status, refusal of
+  a non-Dexcom or missing configuration, exactly one source.
+- **`test_credentials.py`, 5 new tests:** the validator's success message contains no
+  values; malformed credentials, and an unset `CREDENTIALS_DIRECTORY`, are rejected
+  without printing values.
+- **`test_makefile.py`, 22 new tests, 88 in total:**
+  - the fake `systemd-run` now decrypts fake credentials into a private directory
+    and runs the real validator, and refuses to run `share_check`;
+  - state-file tests: the status reads the configured file, a matching `STATE_DIR` is
+    accepted, and a mismatching one is refused for three targets before any call;
+  - the preflight and `share_check` use the same configuration, and `dexcom-config`
+    and `status` report the configured state;
+  - rotation tests: password and username succeed only after validation; four
+    failures (typo, too long, empty, encryption failure) keep the current file and
+    remove the temporary one;
+  - four wrong confirmations ask for nothing, and refusals stop without a credential
+    name, a terminal or credentials;
+  - the credential check accepts valid files and rejects a wrong embedded name and a
+    two-line value;
+  - typed values never appear in any argument, environment or output.
+- **Python 3.11.18 and 3.13.18:** ruff clean, mypy strict clean (30 files), pytest 761
+  passed.
+- **Mutation check:** all 12 mutations of the new safeguards fail the tests:
+  - the status or preflight reads `STATE_DIR`;
+  - the mismatch check is disabled;
+  - `share_state` ignores `--config`;
+  - the rotation skips validation, encrypts over the current file, accepts different
+    entries, passes the value as an argument, exports it, skips the confirmation,
+    leaves the temporary file or needs no terminal.
+
+  The earlier 12 Makefile mutations still fail them too.
+- **Firmware:** unchanged; see the checks below.
+
+### Notes
+
+- A built-in safety check refused two shell commands whose text contained `rm`
+  (a mutation that let `clean` delete the virtual environment, and the rotation
+  recipe's trap). Neither ran. The Makefile text was written with the editor instead,
+  and the `clean` mutation was not run.
+- Not run for real: `dexcom-credentials`, `dexcom-credentials-check` and
+  `dexcom-credentials-rotate` against real systemd credentials, and `dexcom-check`.
+  They were tested only with fakes; nothing contacted Dexcom.
+
 ## 2026-11-13 — Root Makefile (`feat/root-makefile`)
 
 ### Inspection
