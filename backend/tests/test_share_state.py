@@ -1,9 +1,10 @@
 import json
+import os
 import stat
 from dataclasses import asdict
 
 import pytest
-from share_harness import START, ShareClock, make_store
+from share_harness import START, ShareClock, StateWrites, make_store
 
 from glucose_guardian import share_state
 from glucose_guardian.dexcom_share import (
@@ -12,12 +13,24 @@ from glucose_guardian.dexcom_share import (
     ShareRateLimited,
     ShareStateError,
 )
-from glucose_guardian.share_state import FIELDS, UNREADABLE, fresh_state, unblock
+from glucose_guardian.share_state import (
+    FIELDS,
+    LOGIN_UNKNOWN,
+    UNREADABLE,
+    AuthState,
+    fresh_state,
+    unblock,
+)
 
 
 @pytest.fixture
 def path(tmp_path):
     return tmp_path / "dexcom-share-state.json"
+
+
+def attempt(store, now_s):
+    store.begin_login(now_s)
+    store.end_login()
 
 
 def test_login_attempt_is_recorded_before_any_request(path, share_clock):
@@ -28,12 +41,13 @@ def test_login_attempt_is_recorded_before_any_request(path, share_clock):
     assert set(data) == FIELDS
     assert data["last_login_boottime_s"] == 1000.0 and data["boot_id"] == "boot-a"
     assert data["last_login_utc"] == START.isoformat()
+    assert data["login_pending"] is True
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert not path.with_name(path.name + ".partial").exists()
 
 
 def test_login_interval_holds_within_and_across_restarts(path, share_clock):
-    make_store(path, share_clock, "boot-a").begin_login(share_clock.boottime)
+    attempt(make_store(path, share_clock, "boot-a"), share_clock.boottime)
     share_clock.advance(299)
     with pytest.raises(ShareLoginDeferred):
         make_store(path, share_clock, "boot-a").begin_login(share_clock.boottime)
@@ -45,7 +59,7 @@ def test_login_interval_holds_within_and_across_restarts(path, share_clock):
 
 
 def test_reboot_restarts_the_cooldown_from_the_new_boot(path, share_clock):
-    make_store(path, share_clock, "boot-a").begin_login(share_clock.boottime)
+    attempt(make_store(path, share_clock, "boot-a"), share_clock.boottime)
     share_clock.boottime = 12.0
     rebooted = make_store(path, share_clock, "boot-b")
     with pytest.raises(ShareLoginDeferred):
@@ -126,6 +140,11 @@ def test_successful_requests_do_not_rewrite_unchanged_state(path, share_clock):
     json.dumps(asdict(fresh_state("boot-a")) | {"last_login_boottime_s": "1000"}),
     json.dumps(asdict(fresh_state("boot-a")) | {"last_login_boottime_s": True}),
     json.dumps(asdict(fresh_state("boot-a")) | {"blocked_reason": 5}),
+    json.dumps(asdict(fresh_state("boot-a")) | {"login_pending": 1}),
+    json.dumps(asdict(fresh_state("boot-a")) | {"login_pending": "false"}),
+    json.dumps(asdict(fresh_state("boot-a")) | {"login_pending": None}),
+    json.dumps({key: value for key, value in asdict(fresh_state("boot-a")).items()
+                if key != "login_pending"}),
 ])
 def test_unreadable_state_blocks_until_unblocked(path, share_clock, content):
     path.write_text(content)
@@ -168,8 +187,136 @@ def test_cli_reports_and_unblocks(path, share_clock, tmp_path, monkeypatch, caps
 def test_state_store_has_no_place_for_secrets():
     assert FIELDS == {"schema", "boot_id", "last_login_boottime_s", "last_login_utc",
                       "rate_limited_until_boottime_s", "rate_limit_backoff_s",
-                      "blocked_reason", "blocked_utc"}
+                      "blocked_reason", "blocked_utc", "login_pending"}
+    assert AuthState.__dataclass_fields__["login_pending"].type in (bool, "bool")
 
 
 def test_share_clock_starts_at_the_synthetic_epoch():
     assert ShareClock().wall == START
+
+
+@pytest.mark.parametrize("boot_id", ["boot-a", "boot-b"])
+def test_unrecorded_login_outcome_blocks_after_restart_and_reboot(path, share_clock,
+                                                                  boot_id):
+    make_store(path, share_clock, "boot-a").begin_login(share_clock.boottime)
+    share_clock.advance(10**6)
+    restarted = make_store(path, share_clock, boot_id)
+    with pytest.raises(ShareAuthBlocked, match=LOGIN_UNKNOWN):
+        restarted.begin_login(share_clock.boottime)
+    assert json.loads(path.read_text())["login_pending"] is True
+
+
+def test_unrecorded_login_outcome_is_cleared_only_by_unblock(path, share_clock, capsys,
+                                                             tmp_path, monkeypatch):
+    make_store(path, share_clock, "boot-a").begin_login(share_clock.boottime)
+    boot_id = tmp_path / "boot_id"
+    boot_id.write_text("boot-a\n")
+    monkeypatch.setattr(share_state, "BOOT_ID", boot_id)
+    assert share_state.main(["--state-file", str(path), "status"]) == share_state.EXIT_OK
+    assert f"blocked: {LOGIN_UNKNOWN}: no outcome recorded" in capsys.readouterr().out
+    unblock(path, "boot-a", share_clock.boottime, share_clock.wall)
+    recovered = make_store(path, share_clock, "boot-a")
+    with pytest.raises(ShareLoginDeferred):
+        recovered.begin_login(share_clock.boottime)
+    share_clock.advance(300)
+    attempt(recovered, share_clock.boottime)
+    assert json.loads(path.read_text())["login_pending"] is False
+
+
+def test_block_that_cannot_be_written_holds_in_process_and_after_restart(
+        path, share_clock, monkeypatch):
+    writes = StateWrites(monkeypatch)
+    store = make_store(path, share_clock, "boot-a")
+    store.begin_login(share_clock.boottime)
+    writes.failing = True
+    store.block("AccountPasswordInvalid")
+    store.end_login()
+    assert writes.failures == 1
+    share_clock.advance(10**6)
+    with pytest.raises(ShareAuthBlocked, match="AccountPasswordInvalid"):
+        store.begin_login(share_clock.boottime)
+    writes.failing = False
+    persisted = json.loads(path.read_text())
+    assert persisted["blocked_reason"] is None and persisted["login_pending"] is True
+    with pytest.raises(ShareAuthBlocked, match=LOGIN_UNKNOWN):
+        make_store(path, share_clock, "boot-a").begin_login(share_clock.boottime)
+
+
+def test_login_rate_limit_that_cannot_be_written_blocks_after_restart(path, share_clock,
+                                                                       monkeypatch):
+    writes = StateWrites(monkeypatch)
+    store = make_store(path, share_clock, "boot-a")
+    store.begin_login(share_clock.boottime)
+    writes.failing = True
+    store.rate_limited(share_clock.boottime, None)
+    store.end_login()
+    with pytest.raises(ShareRateLimited):
+        store.check_ready(share_clock.boottime + 119)
+    writes.failing = False
+    with pytest.raises(ShareAuthBlocked, match=LOGIN_UNKNOWN):
+        make_store(path, share_clock, "boot-a").begin_login(share_clock.boottime + 10**6)
+
+
+def test_read_rate_limit_that_cannot_be_written_falls_back_to_the_login_interval(
+        path, share_clock, monkeypatch):
+    writes = StateWrites(monkeypatch)
+    store = make_store(path, share_clock, "boot-a")
+    attempt(store, share_clock.boottime)
+    share_clock.advance(60)
+    writes.failing = True
+    store.rate_limited(share_clock.boottime, 1800.0)
+    with pytest.raises(ShareRateLimited):
+        store.check_ready(share_clock.boottime + 1799)
+    writes.failing = False
+    restarted = make_store(path, share_clock, "boot-a")
+    restarted.check_ready(share_clock.boottime)
+    with pytest.raises(ShareLoginDeferred):
+        restarted.begin_login(share_clock.boottime)
+    share_clock.advance(240)
+    restarted.begin_login(share_clock.boottime)
+
+
+def test_login_outcome_that_cannot_be_written_is_retried_by_the_next_success(
+        path, share_clock, monkeypatch):
+    writes = StateWrites(monkeypatch)
+    store = make_store(path, share_clock, "boot-a")
+    store.begin_login(share_clock.boottime)
+    writes.failing = True
+    store.end_login()
+    assert json.loads(path.read_text())["login_pending"] is True
+    writes.failing = False
+    store.succeeded()
+    assert json.loads(path.read_text())["login_pending"] is False
+    make_store(path, share_clock, "boot-a").check_ready(share_clock.boottime)
+
+
+def test_failed_writes_never_leave_a_partial_file_or_damage_the_last_state(path,
+                                                                           share_clock,
+                                                                           monkeypatch):
+    store = make_store(path, share_clock, "boot-a")
+    attempt(store, share_clock.boottime)
+    before = path.read_text()
+    partial = path.with_name(path.name + ".partial")
+    for target in ("fsync", "replace"):
+        def broken(*args, **kwargs):
+            raise OSError("synthetic failure")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, target, broken)
+            with pytest.raises(OSError):
+                share_state.write_state(path, store.state)
+        assert path.read_text() == before
+        assert not partial.exists()
+
+
+@pytest.mark.parametrize("write", ["store", "unblock"])
+def test_a_single_write_is_private_even_over_a_stale_partial_file(path, share_clock, write):
+    partial = path.with_name(path.name + ".partial")
+    partial.write_text("stale")
+    partial.chmod(0o644)
+    if write == "store":
+        make_store(path, share_clock, "boot-a").begin_login(share_clock.boottime)
+    else:
+        unblock(path, "boot-a", share_clock.boottime, share_clock.wall)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert not partial.exists()
