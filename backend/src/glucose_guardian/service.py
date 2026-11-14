@@ -2,11 +2,9 @@
 import argparse
 import logging
 import os
-import signal
 import ssl
 import subprocess
 import sys
-import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -30,6 +28,7 @@ from .share_client import (
     urllib_poster,
 )
 from .share_state import BOOT_ID, AuthStateStore, read_boot_id
+from .shutdown import stop_on_signals
 from .simulation import SCENARIOS, ScenarioProvider
 from .snapshot import SnapshotDisplay
 from .transport import AlarmTransport, SimulatedTransport
@@ -170,20 +169,15 @@ def main(argv: list[str]) -> int:
         source=acquisition.source, source_status=acquisition.source_status,
         outputs_enabled=config.outputs_enabled)
 
-    stop = threading.Event()
-    handlers = {sig: signal.signal(sig, lambda signum, frame: stop.set())
-                for sig in (signal.SIGTERM, signal.SIGINT)}
-    log.info("runtime started: %s transport=%s display=%s", acquisition.description,
-             "simulated" if config.serial is None else "serial",
-             "log" if config.display is None else "snapshot")
     try:
-        runtime.run(stop.wait)
+        with stop_on_signals() as stop:
+            log.info("runtime started: %s transport=%s display=%s", acquisition.description,
+                     "simulated" if config.serial is None else "serial",
+                     "log" if config.display is None else "snapshot")
+            runtime.run(stop.wait)
     except Exception:
         log.exception("runtime crashed")
         return EXIT_CRASHED
-    finally:
-        for sig, handler in handlers.items():
-            signal.signal(sig, handler)
     log.info("runtime stopped after %d ticks", runtime.counts["ticks"])
     return EXIT_STOPPED
 
