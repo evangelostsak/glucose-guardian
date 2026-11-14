@@ -15,6 +15,12 @@ Run `make check` (ruff, mypy, pytest, both firmware images and the native firmwa
 tests), or `make lint typecheck test` when PlatformIO is unavailable. Add transition, stale-data, failure, and recovery
 tests when changing alarm behavior. Work on feature branches.
 
+## Communication
+
+Chat replies MUST always use caveman ultra style; in Claude Code, invoke the `/caveman ultra`
+skill at the start of every session. Code, comments, commit messages, documents and pull
+request descriptions stay in normal prose.
+
 ## Development handoff protocol
 
 At the end of every implementation task:
