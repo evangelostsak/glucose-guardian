@@ -243,7 +243,10 @@ workers, the configured display and the configured transport. With `dexcom_share
 missing credentials or a missing state directory stop the service at startup with exit
 status 2, and so does a missing snapshot directory. A
 serial transport gets a random 16-bit session per process. It
-stops on SIGTERM or SIGINT and restores the previous signal handlers. Exit status: 0
+stops on SIGTERM or SIGINT and restores the previous signal handlers. Both the runtime
+and the display process use `shutdown.stop_on_signals()`: the handler only writes one
+byte to a non-blocking, close-on-exec self-pipe, and the loop's `wait(timeout_s) -> bool`
+polls its read end, so a handler never takes a lock. Exit status: 0
 stopped, 1 crashed, 2 configuration error. Logs contain levels and fault names, never
 glucose values. Stopping the service stops heartbeats, which the Uno will treat as a
 communication fault; a planned stop is not silent.
