@@ -109,6 +109,13 @@ column is the owner-reported result of the check on 2026-11-13.
 | `[dexcom] rate_limit_initial_s`, `rate_limit_max_s` | 120, 1800 | Provisional; initial must not exceed max |
 | `[dexcom] request_timeout_s` | 5 | Three times it must not exceed `fetch_timeout_s` (20) |
 | `[dexcom] state_file` | `/var/lib/glucose-guardian/dexcom-share-state.json` | Absolute; its directory must exist |
+| `[display]` | `kind = "snapshot"`, `snapshot_file = "/run/glucose-guardian/display.json"`, 5 s, 1 s, 1800 s, `/dev/fb0`, DejaVu Sans Bold | Required since M5 PR A; see ARCHITECTURE |
+
+`[display]` is required. A configuration written before M5 PR A, such as an existing
+`config/local.dexcom.toml` on the Pi, is refused with a configuration error naming
+`[display]`. That stops `dexcom-status`, `dexcom-check` and the Dexcom line of
+`status` until the `[display]` block from `config/example-dexcom-share.toml` is added.
+The table never affects Dexcom access.
 
 The configuration never contains credentials; unknown keys such as `password` are
 rejected.

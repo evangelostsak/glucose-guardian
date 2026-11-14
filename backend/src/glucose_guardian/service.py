@@ -2,13 +2,12 @@
 import argparse
 import logging
 import os
-import signal
 import ssl
 import subprocess
 import sys
-import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
@@ -16,8 +15,8 @@ from pathlib import Path
 from .clock import systemd_clock_synchronized
 from .config import Config, ConfigError, load_config
 from .credentials import CredentialsError, load_credentials
-from .dexcom_share import APPLICATION_ID, SERVERS, SERVICES_PATH
-from .display import LogDisplay
+from .dexcom_share import APPLICATION_ID, SERVERS, SERVICES_PATH, ShareStatus
+from .display import Display, FanOutDisplay, LogDisplay, Source
 from .providers import GlucoseProvider
 from .runtime import Runtime
 from .serial_transport import SerialTransport, open_serial
@@ -29,7 +28,9 @@ from .share_client import (
     urllib_poster,
 )
 from .share_state import BOOT_ID, AuthStateStore, read_boot_id
+from .shutdown import stop_on_signals
 from .simulation import SCENARIOS, ScenarioProvider
+from .snapshot import SnapshotDisplay
 from .transport import AlarmTransport, SimulatedTransport
 from .worker import spawn_daemon_thread
 
@@ -93,7 +94,18 @@ def production_session(config: Config) -> ShareSession:
         context=ssl.create_default_context())
 
 
-Acquisition = tuple[GlucoseProvider, Callable[[], bool], Callable[[float], bool], str]
+@dataclass(frozen=True)
+class Acquisition:
+    provider: GlucoseProvider
+    clock_check: Callable[[], bool]
+    heartbeat_ok: Callable[[float], bool]
+    description: str
+    source: Source
+    source_status: Callable[[], ShareStatus | None]
+
+
+def no_status() -> None:
+    return None
 
 
 def build_acquisition(config: Config, start_s: float) -> Acquisition:
@@ -101,8 +113,9 @@ def build_acquisition(config: Config, start_s: float) -> Acquisition:
         share = DexcomShareProvider(production_session(config),
                                     max_age_s=config.policy.max_age_s)
         timeout_s = config.runtime.clock_check_timeout_s
-        return (share, lambda: systemd_clock_synchronized(subprocess.run, timeout_s),
-                lambda t: True, f"provider=dexcom_share server={config.dexcom.server}")
+        return Acquisition(share, lambda: systemd_clock_synchronized(subprocess.run, timeout_s),
+                           lambda t: True, f"provider=dexcom_share server={config.dexcom.server}",
+                           Source.DEXCOM_SHARE, lambda: share.status)
     if config.scenario is None:
         raise ConfigError("provider simulated requires a [simulation] scenario")
     scenario = SCENARIOS[config.scenario]
@@ -112,9 +125,21 @@ def build_acquisition(config: Config, start_s: float) -> Acquisition:
 
     provider = ScenarioProvider(scenario, start_wall=datetime.now(UTC), elapsed=elapsed,
                                 hang=lambda seconds: time.sleep(max(0.0, seconds)))
-    return (provider, lambda: scenario.segment_at(elapsed())[1].clock_synchronized,
-            lambda t: scenario.segment_at(t - start_s)[1].heartbeat,
-            f"scenario={config.scenario}")
+    return Acquisition(provider, lambda: scenario.segment_at(elapsed())[1].clock_synchronized,
+                       lambda t: scenario.segment_at(t - start_s)[1].heartbeat,
+                       f"scenario={config.scenario}", Source.SIMULATED, no_status)
+
+
+def build_display(config: Config) -> Display:
+    settings = config.display
+    if settings is None:
+        return LogDisplay()
+    directory = settings.snapshot_file.parent
+    if not directory.is_dir():
+        raise ConfigError(f"[display] snapshot_file directory {directory} does not exist")
+    return FanOutDisplay((LogDisplay(), SnapshotDisplay(
+        path=settings.snapshot_file, monotonic=time.monotonic,
+        max_age_s=config.policy.max_age_s)))
 
 
 def main(argv: list[str]) -> int:
@@ -130,29 +155,29 @@ def main(argv: list[str]) -> int:
 
     start_s = time.monotonic()
     try:
-        provider, clock_check, heartbeat_ok, description = build_acquisition(config, start_s)
+        display = build_display(config)
+        acquisition = build_acquisition(config, start_s)
     except (ConfigError, CredentialsError, OSError) as error:
         log.error("%s", error)
         return EXIT_CONFIG
     runtime = Runtime(
-        policy=config.policy, settings=config.runtime, provider=provider,
-        clock_check=clock_check, transport=build_transport(config, heartbeat_ok),
-        display=LogDisplay(), wall_clock=lambda: datetime.now(UTC), monotonic=time.monotonic,
-        acquisition_spawn=spawn_daemon_thread, clock_spawn=spawn_daemon_thread)
+        policy=config.policy, settings=config.runtime, provider=acquisition.provider,
+        clock_check=acquisition.clock_check,
+        transport=build_transport(config, acquisition.heartbeat_ok), display=display,
+        wall_clock=lambda: datetime.now(UTC), monotonic=time.monotonic,
+        acquisition_spawn=spawn_daemon_thread, clock_spawn=spawn_daemon_thread,
+        source=acquisition.source, source_status=acquisition.source_status,
+        outputs_enabled=config.outputs_enabled)
 
-    stop = threading.Event()
-    handlers = {sig: signal.signal(sig, lambda signum, frame: stop.set())
-                for sig in (signal.SIGTERM, signal.SIGINT)}
-    log.info("runtime started: %s transport=%s", description,
-             "simulated" if config.serial is None else "serial")
     try:
-        runtime.run(stop.wait)
+        with stop_on_signals() as stop:
+            log.info("runtime started: %s transport=%s display=%s", acquisition.description,
+                     "simulated" if config.serial is None else "serial",
+                     "log" if config.display is None else "snapshot")
+            runtime.run(stop.wait)
     except Exception:
         log.exception("runtime crashed")
         return EXIT_CRASHED
-    finally:
-        for sig, handler in handlers.items():
-            signal.signal(sig, handler)
     log.info("runtime stopped after %d ticks", runtime.counts["ticks"])
     return EXIT_STOPPED
 

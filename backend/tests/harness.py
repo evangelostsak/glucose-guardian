@@ -5,7 +5,7 @@ from pathlib import Path
 
 from glucose_guardian.alarms import Policy, State
 from glucose_guardian.config import RuntimeSettings
-from glucose_guardian.display import MemoryDisplay
+from glucose_guardian.display import MemoryDisplay, Source
 from glucose_guardian.protocol import (
     MAX_LINE_BYTES,
     LineBuffer,
@@ -24,6 +24,7 @@ from glucose_guardian.worker import run_inline
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.toml"
+EXAMPLE_SNAPSHOT = "/tmp/glucose-guardian-display.json"
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 POLICY = Policy(urgent_low_mg_dl=55, low_mg_dl=70, high_mg_dl=250, hysteresis_mg_dl=5,
                 rearm_mg_dl=10, max_age_s=600, max_future_skew_s=60,
@@ -34,13 +35,17 @@ SETTINGS = RuntimeSettings(tick_s=1, fetch_interval_s=60, fetch_timeout_s=10,
 
 
 def write_config(tmp_path: Path, *replacements: tuple[str, str]) -> Path:
-    text = EXAMPLE.read_text()
+    text = EXAMPLE.read_text().replace(EXAMPLE_SNAPSHOT, str(tmp_path / "display.json"))
     for old, new in replacements:
         assert old in text
         text = text.replace(old, new)
     path = tmp_path / "local.toml"
     path.write_text(text)
     return path
+
+
+def no_status() -> None:
+    return None
 
 
 def unexpected_hang(seconds: float) -> None:
@@ -54,6 +59,7 @@ def build_runtime(**changes: object) -> Runtime:
         "transport": SimulatedTransport(heartbeat_ok=lambda t: True),
         "display": MemoryDisplay(), "wall_clock": lambda: NOW, "monotonic": lambda: 0.0,
         "acquisition_spawn": run_inline, "clock_spawn": run_inline,
+        "source": Source.SIMULATED, "source_status": no_status, "outputs_enabled": False,
     }
     assert set(changes) <= set(parts)
     return Runtime(**{**parts, **changes})
@@ -73,7 +79,8 @@ class Harness:
             clock_check=lambda: self.segment(self.t).clock_synchronized,
             transport=self.transport, display=self.display,
             wall_clock=lambda: NOW + timedelta(seconds=self.t), monotonic=lambda: self.t,
-            acquisition_spawn=self.spawn_fetch, clock_spawn=run_inline)
+            acquisition_spawn=self.spawn_fetch, clock_spawn=run_inline, source=Source.SIMULATED,
+            source_status=no_status, outputs_enabled=False)
 
     def segment(self, t: float) -> Segment:
         return self.scenario.segment_at(t)[1]

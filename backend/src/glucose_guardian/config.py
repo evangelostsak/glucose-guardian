@@ -11,6 +11,8 @@ from .simulation import SCENARIOS
 
 PROVIDERS = frozenset({"simulated", "dexcom_share"})
 TRANSPORTS = frozenset({"simulated", "serial"})
+DISPLAY_KINDS = frozenset({"log", "snapshot"})
+DISPLAY_PATHS = ("snapshot_file", "framebuffer", "font_file")
 SHARE_SERVERS = frozenset(SERVERS) | {"simulator"}
 MIN_LOGIN_INTERVAL_S = 300.0
 
@@ -55,6 +57,23 @@ class _ShareTiming:
 
 
 @dataclass(frozen=True)
+class DisplaySettings:
+    snapshot_file: Path
+    snapshot_max_age_s: float
+    refresh_s: float
+    last_known_cutoff_s: float
+    framebuffer: Path
+    font_file: Path
+
+
+@dataclass(frozen=True)
+class _DisplayTiming:
+    snapshot_max_age_s: float
+    refresh_s: float
+    last_known_cutoff_s: float
+
+
+@dataclass(frozen=True)
 class Config:
     provider: str
     scenario: str | None
@@ -62,6 +81,8 @@ class Config:
     runtime: RuntimeSettings
     serial: SerialSettings | None
     dexcom: DexcomSettings | None
+    display: DisplaySettings | None
+    outputs_enabled: bool
 
 
 def load_config(path: Path) -> Config:
@@ -82,8 +103,8 @@ def _parse(data: dict[str, Any], source: str) -> Config:
     if not isinstance(provider, str) or provider not in PROVIDERS:
         raise ConfigError(f"{source}: provider must be one of {sorted(PROVIDERS)}")
     acquisition = "simulation" if provider == "simulated" else "dexcom"
-    _check_keys(data, {"provider", "alarm", "runtime", "transport", acquisition}, {"hardware"},
-                "top level", source)
+    _check_keys(data, {"provider", "alarm", "runtime", "transport", "display", acquisition},
+                {"hardware"}, "top level", source)
     scenario = None
     if provider == "simulated":
         simulation = _table(data, "simulation", source)
@@ -107,8 +128,41 @@ def _parse(data: dict[str, Any], source: str) -> Config:
     _check_runtime(runtime, policy, source)
     dexcom = None if provider == "simulated" \
         else _dexcom(_table(data, "dexcom", source), runtime, source)
+    display = _display(_table(data, "display", source), runtime, policy, source)
     return Config(provider, scenario, policy, runtime,
-                  _serial(_table(data, "transport", source), source), dexcom)
+                  _serial(_table(data, "transport", source), source), dexcom, display,
+                  outputs_enabled=False)
+
+
+def _display(table: dict[str, Any], runtime: RuntimeSettings, policy: Policy,
+             source: str) -> DisplaySettings | None:
+    kind = table.get("kind")
+    if kind not in DISPLAY_KINDS:
+        raise ConfigError(f"{source}: [display] kind must be one of {sorted(DISPLAY_KINDS)}")
+    if kind == "log":
+        _check_keys(table, {"kind"}, set(), "[display]", source)
+        return None
+    timing_keys = {field.name for field in fields(_DisplayTiming)}
+    _check_keys(table, {"kind", *DISPLAY_PATHS} | timing_keys, set(), "[display]", source)
+    timing = _DisplayTiming(**_numbers({key: table[key] for key in timing_keys},
+                                       _DisplayTiming, "[display]", source))
+    for key in DISPLAY_PATHS:
+        if not isinstance(table[key], str) or not Path(table[key]).is_absolute():
+            raise ConfigError(f"{source}: [display] {key} must be an absolute path")
+    rules = (
+        (timing.snapshot_max_age_s > runtime.tick_s,
+         "[display] snapshot_max_age_s must exceed [runtime] tick_s"),
+        (timing.refresh_s < timing.snapshot_max_age_s,
+         "[display] refresh_s must be below snapshot_max_age_s"),
+        (timing.last_known_cutoff_s > policy.max_age_s,
+         "[display] last_known_cutoff_s must exceed [alarm] max_age_s"),
+    )
+    for ok, message in rules:
+        if not ok:
+            raise ConfigError(f"{source}: {message}")
+    return DisplaySettings(Path(table["snapshot_file"]), timing.snapshot_max_age_s,
+                           timing.refresh_s, timing.last_known_cutoff_s,
+                           Path(table["framebuffer"]), Path(table["font_file"]))
 
 
 def _dexcom(table: dict[str, Any], runtime: RuntimeSettings, source: str) -> DexcomSettings:

@@ -9,14 +9,20 @@ template.
 
 | Module | Responsibility |
 |---|---|
-| `providers.py` | Immutable `Reading` and the `GlucoseProvider` boundary (`read(now) -> Reading \| None`) |
+| `providers.py` | Immutable `Reading` (value, UTC time and the trend sent with it) and the `GlucoseProvider` boundary (`read(now) -> Reading \| None`) |
 | `validation.py` | Reading value and timestamp checks |
 | `alarms.py` | Pure alarm policy; no I/O |
 | `worker.py` | Bounded background jobs with hard timeouts |
 | `clock.py` | Wall-clock synchronization check |
 | `config.py` | Strict TOML configuration loading |
 | `simulation.py` | Deterministic synthetic scenarios and their provider |
-| `display.py` | Display frame model, log display, in-memory display double |
+| `display.py` | Display frame model and its data source, log display, fan-out display, in-memory display double |
+| `snapshot.py` | Display snapshot schema 1: atomic writer (`SnapshotDisplay`) and strict reader |
+| `screen_model.py` | Pure classification of a snapshot into what the bedside screen shows |
+| `screen_render.py` | Pillow renderer of a screen model into an 800×480 image |
+| `screen.py` | Display process: snapshot, screen model, renderer, image output, systemd notifications |
+| `notify.py` | systemd notifications over the Unix datagram socket in `$NOTIFY_SOCKET` |
+| `preview.py` | Synthetic dashboard previews (`make display-preview`) |
 | `transport.py` | Transport boundary (`receive`, `send`) and simulated transport double |
 | `protocol.py` | Serial protocol v1 framing, checksums and validation; no I/O |
 | `link.py` | Pi-side link state: liveness, replay rejection, reset detection, button counters |
@@ -34,8 +40,8 @@ template.
 clock synchronization status and heartbeat age, all as required arguments. Every call
 re-evaluates data age and heartbeat age, so the fixed-rate runtime detects faults
 independently of when readings arrive. Dexcom Share acquisition is described below
-and in [DEXCOM_SHARE.md](DEXCOM_SHARE.md). There is no GUI yet; the M5 plan designs
-the HDMI display. The Uno
+and in [DEXCOM_SHARE.md](DEXCOM_SHARE.md). The display software is described under
+*Display* below; it has no physical output yet. The Uno
 firmware lives in `firmware/arduino-uno/lib/guardian/` (testable C++) with Arduino
 glue in `src/main.cpp`; the protocol is specified in [PROTOCOL.md](PROTOCOL.md).
 
@@ -202,13 +208,16 @@ rejected), and `[alarm]` builds a validated `Policy`.
 | `[simulation]` | `scenario` (a name from `SCENARIOS`) |
 | `[dexcom]` | `server` (`us`, `ous`, `jp`, `simulator` with `simulator_port`), `login_min_interval_s` (at least 300), `rate_limit_initial_s`, `rate_limit_max_s`, `request_timeout_s`, `state_file` (absolute) |
 | `[transport]` | `kind = "simulated"` alone, or `kind = "serial"` with `device`, `reconnect_initial_s`, `reconnect_max_s` |
+| `[display]` | `kind = "log"` alone, or `kind = "snapshot"` with `snapshot_file`, `snapshot_max_age_s`, `refresh_s`, `last_known_cutoff_s`, `framebuffer` and `font_file` (paths absolute) |
 | `[hardware]` | optional; `outputs_enabled` may only be `false` |
 
 The only default is the fail-safe one: a missing `[hardware]` table means outputs
 disabled. Cross-checks: `tick_s < heartbeat_timeout_s`, `fetch_timeout_s <=
 fetch_interval_s`, `fetch_interval_s < max_age_s`, `clock_check_timeout_s <=
 clock_check_interval_s`, `reconnect_initial_s <= reconnect_max_s`,
-`rate_limit_initial_s <= rate_limit_max_s`, `3 * request_timeout_s <= fetch_timeout_s`.
+`rate_limit_initial_s <= rate_limit_max_s`, `3 * request_timeout_s <= fetch_timeout_s`,
+`snapshot_max_age_s > tick_s`, `refresh_s < snapshot_max_age_s`,
+`last_known_cutoff_s > max_age_s`.
 The file holds no credentials; unknown keys such as `password` are rejected, and Dexcom
 credentials come from systemd credentials.
 
@@ -230,14 +239,67 @@ segment ends, which keeps every scenario deterministic.
 
 `python -m glucose_guardian.service --config <file>` runs the configured scenario, or
 Dexcom Share acquisition with the systemd clock check, in real time with daemon-thread
-workers, a log display and the configured transport. With `dexcom_share`, missing
-credentials or a missing state directory stop the service at startup with exit
-status 2. A
+workers, the configured display and the configured transport. With `dexcom_share`,
+missing credentials or a missing state directory stop the service at startup with exit
+status 2, and so does a missing snapshot directory. A
 serial transport gets a random 16-bit session per process. It
-stops on SIGTERM or SIGINT and restores the previous signal handlers. Exit status: 0
+stops on SIGTERM or SIGINT and restores the previous signal handlers. Both the runtime
+and the display process use `shutdown.stop_on_signals()`: the handler only writes one
+byte to a non-blocking, close-on-exec self-pipe, and the loop's `wait(timeout_s) -> bool`
+polls its read end, so a handler never takes a lock. Exit status: 0
 stopped, 1 crashed, 2 configuration error. Logs contain levels and fault names, never
 glucose values. Stopping the service stops heartbeats, which the Uno will treat as a
 communication fault; a planned stop is not silent.
+
+## Display (M5 PR A)
+
+The runtime and the screen are separate processes, connected by one file. The design,
+its decisions and the hardware steps still to come are in the
+[M5 plan](plans/2026-11-13-m5-hdmi-display.md).
+
+- **Frame:** `build_frame` adds the last valid reading's time and trend, the data
+  source (`simulated` or `dexcom_share`), the provider status (`None` exactly for a
+  simulated source) and whether outputs are enabled. The runtime builds the frame
+  inside its display guard, so a frame or display error is counted and alarm
+  evaluation continues.
+- **Fan-out:** with `kind = "snapshot"` the service renders every frame to
+  `LogDisplay` and `SnapshotDisplay` through `FanOutDisplay`, which calls both and
+  raises the first failure only afterwards.
+- **Snapshot:** `snapshot.py` writes schema 1 as compact JSON every tick:
+  - a new partial file with mode 0640, then an atomic rename;
+  - no `fsync`, because the file belongs on tmpfs (`/run`) and the rename is atomic
+    for readers;
+  - at most 4096 bytes.
+
+  The reader accepts only a regular, non-symlinked file with exactly the schema's
+  fields, strict types, known values, a UTC reading time and consistent fields. Any
+  deviation rejects the whole snapshot.
+- **Screen model:** `screen_model.classify` turns a snapshot, or a missing or invalid
+  one, into one of four states:
+  - `no_data`: no usable snapshot, one older than `snapshot_max_age_s` or written in
+    the future by monotonic time, or one from another source or outputs setting;
+  - `live`: the engine marked the reading current and its age, recomputed as
+    `data_age_s + (now − written)` on the monotonic clock, is within `max_age_s`;
+  - `last_known`: an older value in grey, labelled with its age, until
+    `last_known_cutoff_s`;
+  - `no_current_data`: no number, with the reason.
+
+  Colors and labels come from the engine's `GlucoseLevel`; the display adds no
+  threshold. The cutoff is a display setting and never reaches the alarm engine.
+- **Renderer:** `screen_render.Renderer` draws the model on a black 800×480 image:
+  - DejaVu Sans Bold, shrunk to fit and shortened rather than clipped;
+  - trend arrows drawn as polygons;
+  - the connection line, faults and silences, a clock, "DISPLAY ONLY: NO ALARM
+    OUTPUT" and "SIMULATED DATA".
+- **Display process:** `python -m glucose_guardian.screen --config <file> --png <file>`
+  reads the snapshot every `refresh_s` and redraws only when the model changes. It
+  sends `READY=1`, `WATCHDOG=1` and `STOPPING=1` when `NOTIFY_SOCKET` is set.
+  - A render or output error ends it with status 1.
+  - `--blank` writes a "Display restarting" frame.
+  - It imports neither the Share client, the credential loader, the login state nor
+    any network client module. A test checks this in a fresh interpreter.
+- **Output:** a PNG file only. The framebuffer or DRM/KMS output follows in PR B,
+  after the hardware smoke test.
 
 ## Dexcom Share acquisition
 
@@ -340,9 +402,10 @@ resolver delays acquisition but starts no new thread.
 
 Every failure raises a `ShareError` and becomes the runtime's `acquisition` fault.
 `DexcomShareProvider.status` tells a blocked login apart from network, server,
-protocol, rate-limit and deferred-login states, for M5. `latest_trend` keeps the trend
-of the newest accepted entry; no alarm uses it. It can describe a newer entry than the
-last valid reading, so the M5 plan moves the trend into `Reading` (finding F1). Logs and exceptions carry only error classes, HTTP statuses
+protocol, rate-limit and deferred-login states; the display shows it. Each `Reading`
+carries the trend of its own entry, so a rejected newer entry can never lend its trend
+to the value shown (M5 finding F1); no alarm uses the trend. Logs and exceptions carry
+only error classes, HTTP statuses
 and Share error codes: never credentials, identifiers, URLs, server messages or values.
 
 ## Serial transport

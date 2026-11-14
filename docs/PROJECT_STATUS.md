@@ -187,6 +187,38 @@ Share diagnostics. `make help` is the default target.
   `make setup-firmware firmware-build firmware-test`.
 - **Tests:** 88 Makefile tests; 761 in total.
 
+**M5 PR A, offline display software** (2026-11-13, `feat/m5-display-pr-a`; section 11
+of the [M5 plan](plans/2026-11-13-m5-hdmi-display.md)). Steps 1 to
+7 of the plan, tested without display hardware:
+
+- **Trend (finding F1 fixed):** each `Reading` carries its own trend, and
+  `latest_trend` is gone. A stale or future-dated newer entry can no longer lend its
+  trend to the value shown.
+- **Frame and source:** frames carry the reading time, trend, data source, Dexcom
+  status and outputs flag.
+- **Snapshot:** the runtime writes a schema-1 JSON snapshot each tick (atomic, mode
+  0640, at most 4096 bytes), next to the log display, through `FanOutDisplay`. A strict
+  reader rejects any malformed snapshot.
+- **Screen:** a pure classifier gives four states (LIVE, LAST KNOWN, NO CURRENT DATA
+  after a 30-minute provisional cutoff, NO DATA). The Pillow renderer draws the
+  800×480 dashboard.
+- **Display process:** `python -m glucose_guardian.screen` writes PNG frames and sends
+  systemd readiness, watchdog and stopping notifications.
+- **Previews:** `make display-preview` writes 31 synthetic PNGs to
+  `build/display-preview/`.
+- **Configuration and dependencies:** a required `[display]` table; `pillow==13.0.0`;
+  CI installs `fonts-dejavu-core`.
+- **Unchanged:** alarm policy, thresholds, acknowledgement, GG1, firmware and the M4
+  login protections.
+- **Review correction (PR #10):** a missing or expired snapshot shows "NO DATA: No
+  recent display data" instead of claiming that the runtime is not running.
+- **Shutdown correction (PR #10):** SIGTERM or SIGINT could deadlock the runtime or
+  the display process, because the handler called `threading.Event.set()` while the
+  interrupted `Event.wait` held the same lock. Both processes now stop through a
+  signal-safe self-pipe (`shutdown.py`).
+- **Tests:** 1051 in total, 290 more than before PR A. 19 of 19 mutations of the new
+  safety rules are caught.
+
 ## Roadmap
 
 Corrected on 2026-11-13 by the owner. The audit's roadmap
@@ -197,7 +229,7 @@ M6 Deployment hardening and M7 Hardware integration.
 |---|---|---|---|
 | M0 to M3 | Housekeeping, alarm policy v2, simulated runtime, serial protocol v1 and firmware | Done; M3 bench-validated | |
 | M4 Dexcom Share acquisition | Read-only Share client, login protection, connectivity check | Done; live-validated 2026-11-13 | |
-| M5 HDMI display | Standalone bedside dashboard on the Waveshare 5-inch 800×480 display; display only | [Plan](plans/2026-11-13-m5-hdmi-display.md) reviewed; owner decisions recorded 2026-11-13; implementation not started | M4; a runtime supervised by systemd (D1, approved); the framebuffer smoke test G1 before the output backend is fixed; the login-state migration before the service starts (D9) |
+| M5 HDMI display | Standalone bedside dashboard on the Waveshare 5-inch 800×480 display; display only | [Plan](plans/2026-11-13-m5-hdmi-display.md) approved with owner decisions (2026-11-13); PR A (offline software) implemented; PR B (Pi integration) not started | M4; a runtime supervised by systemd (D1, approved); the framebuffer smoke test G1 before the output backend is fixed; the login-state migration before the service starts (D9) |
 | M6 Physical siren and alarm hardware | Siren driver and Uno alarm outputs, the button, the audible link-lost alarm, hardware-in-the-loop tests | Not started | Components purchased; wiring and electrical review, including the Uno power topology (audit finding H5); retained-level persistence; explicit approval |
 | M7 Bed shaker and additional hardware | Bed-shaker driver, backup power and other peripherals | Not started | M6; components; wiring review |
 
@@ -225,7 +257,14 @@ there means deployment hardening and "M7" hardware integration.
     never a reset;
   - the soak uses the simulated transport first.
 
-  No M5 code exists. PR A (offline) is the next implementation step.
+  PR A, the offline software, is implemented and awaits the owner's review and commit.
+  PR B needs the prerequisites in section 12 of the plan first:
+  - the cross-process lock for the Dexcom login state;
+  - the hardware smoke test G1, now that `/dev/fb0` was absent on the headless Pi;
+  - the `[display]` table in the Pi's configuration;
+  - `fonts-dejavu-core` on the Pi.
+
+  PR B starts only with explicit approval.
 - **Open from M4:**
   - the soak against Share with outputs disabled, part of the M5 Pi validation;
   - confirmation of the LOW and HIGH encodings when such a reading occurs.
@@ -238,7 +277,7 @@ there means deployment hardening and "M7" hardware integration.
   - the physical button;
   - power-loss resilience;
   - the Waveshare 800×480 display (M5: smoke test G1, then checks H1 to H14 in its
-    plan).
+    plan). The display is still packaged.
 - With Optiboot 4.4, power-on, brown-out and external resets all report `U`. A
   watchdog reset while the Pi is disconnected is lost from `cause` when the Pi
   reconnects, because opening the port resets the Uno again.
@@ -255,8 +294,21 @@ there means deployment hardening and "M7" hardware integration.
   in section 3.8 of the M5 plan: an exact copy with mode 0600, verified, never reset
   or unblocked. Afterwards the check and the service use that one file and never run
   at the same time.
-- The Pi's display stack is unknown: desktop or headless (D3), and whether the kernel
-  provides a usable framebuffer for the Waveshare panel (G1).
+- Pi inspection, 2026-11-13: headless (`multi-user.target`, no display manager);
+  `/dev/dri/card0` and `/dev/dri/renderD128` present; `/dev/fb0` absent with no display
+  connected. Whether a framebuffer appears with the panel attached is unknown; G1
+  decides between `/dev/fb0` and a KMS/DRM output.
+- The synthetic Dexcom Share simulator (`share_simulator.main`, a development tool)
+  still stops through `threading.Event.set()` in its signal handler and can hang on
+  stop in the same way; it was outside the scope of the PR #10 shutdown correction.
+- `AuthStateStore` loads the login state once and replaces the file on each change, so
+  two processes on one state file can overwrite each other's cooldown, backoff or
+  block. A cross-process lock (plan section 12.2) is mandatory before the service and
+  the check share a state file and before continuous live monitoring.
+- `[display]` is now a required configuration table. The Pi's existing
+  `config/local.dexcom.toml` lacks it, so `make dexcom-status`, `make dexcom-check` and
+  the Dexcom line of `make status` stop with a configuration error until the block
+  from `config/example-dexcom-share.toml` is added.
 - The publisher credentials on the Pi are protected only by the host key on the same
   SD card (no TPM).
 - A service stop, crash or power loss during the few seconds of a Dexcom login blocks
@@ -267,9 +319,8 @@ there means deployment hardening and "M7" hardware integration.
 - Electrical drivers, backup power, GPIO mappings, button wiring and Uno power topology
   are unselected.
 - Physical outputs and button input require reviewed wiring and explicit approval.
-- GUI and systemd installation are absent; both are part of M5 (D1 approved).
-- `DexcomShareProvider.latest_trend` can describe a newer entry than the last valid
-  reading (finding F1 in the M5 plan). Nothing reads it yet; M5 step 1 replaces it.
+- The display software exists offline only: no framebuffer or DRM output, no systemd
+  units and no installation yet (M5 PR B, D1 approved).
 - Remaining audit findings:
   - H5, the Uno power topology: hardware review before M6;
   - M6, systemd supervision: part of M5 (D1, approved);

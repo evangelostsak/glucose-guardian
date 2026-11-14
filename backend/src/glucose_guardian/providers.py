@@ -3,11 +3,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
+from .dexcom_share import Trend
+
 
 @dataclass(frozen=True)
 class Reading:
     mg_dl: float
     timestamp: datetime
+    trend: Trend | None
 
 
 class GlucoseProvider(Protocol):
@@ -26,4 +29,4 @@ class SimulatedProvider:
     def read(self, now: datetime) -> Reading:
         value = self.values[self.index % len(self.values)]
         self.index += 1
-        return Reading(value, now)
+        return Reading(value, now, None)

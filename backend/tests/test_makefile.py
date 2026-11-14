@@ -93,6 +93,8 @@ def test_every_phony_target_is_described_in_help():
     ("simulator", [], ["-m glucose_guardian.share_simulator --port 8765 --scenario normal"]),
     ("simulate", [], [f"env -u CREDENTIALS_DIRECTORY {FAKE_VENV}/bin/python -m "
                       f"glucose_guardian.service --config {ROOT}/config/example.toml"]),
+    ("display-preview", [], [f"{FAKE_VENV}/bin/python -m glucose_guardian.preview --config "
+                             f"{ROOT}/config/example.toml --out {ROOT}/build/display-preview"]),
     ("bench-setup", [], ["sudo apt-get install -y python3-venv avrdude usbutils",
                          f"python3 -m venv {FAKE_VENV}"]),
     ("bench-discover", [], [f"{FAKE_VENV}/bin/python -m glucose_guardian.bench discover"]),

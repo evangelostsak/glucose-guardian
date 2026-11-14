@@ -36,7 +36,8 @@ def machine():
 def step(machine, **changes):
     assert set(changes) <= set(HEALTHY)
     i = {**HEALTHY, **changes}
-    reading = None if i["missing"] else Reading(i["mg_dl"], NOW - timedelta(seconds=i["age_s"]))
+    reading = None if i["missing"] else Reading(
+        i["mg_dl"], NOW - timedelta(seconds=i["age_s"]), None)
     return machine.update(reading, now=NOW, monotonic_s=i["tick"],
                           acquisition_ok=i["acquisition_ok"],
                           clock_synchronized=i["clock_ok"], heartbeat_age_s=i["heartbeat_s"],
@@ -277,7 +278,7 @@ def test_example_config_is_a_valid_policy():
 
 def test_naive_now_raises(machine):
     with pytest.raises(ValueError):
-        machine.update(Reading(110, NOW), now=NOW.replace(tzinfo=None), monotonic_s=0,
+        machine.update(Reading(110, NOW, None), now=NOW.replace(tzinfo=None), monotonic_s=0,
                        acquisition_ok=True, clock_synchronized=True, heartbeat_age_s=0,
                        controller_faults=frozenset())
 

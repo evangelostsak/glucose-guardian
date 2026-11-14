@@ -10,7 +10,7 @@ import serial
 
 from ..alarms import Fault, Policy
 from ..config import RuntimeSettings
-from ..display import Frame, MemoryDisplay
+from ..display import Frame, MemoryDisplay, Source
 from ..protocol import crc16, encode_state
 from ..providers import SimulatedProvider
 from ..runtime import Runtime
@@ -400,7 +400,8 @@ def check_sustained(bench: Bench) -> Check:
                       provider=SimulatedProvider((110,)), clock_check=lambda: True,
                       transport=transport, display=display, wall_clock=lambda: datetime.now(UTC),
                       monotonic=bench.clock, acquisition_spawn=run_inline,
-                      clock_spawn=run_inline)
+                      clock_spawn=run_inline, source=Source.SIMULATED,
+                      source_status=lambda: None, outputs_enabled=False)
     usage_before = resource.getrusage(resource.RUSAGE_SELF)
     start = bench.clock()
     end = start + profile.sustained_s

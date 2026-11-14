@@ -7,7 +7,8 @@ Status:
   review changed the last-known cutoff (D6) and made the framebuffer output
   conditional on a smoke test (G1). It also added the login-state migration
   (section 3.8) and the account and permission model (section 3.6).
-- No M5 code exists; implementation has not started.
+- PR A (steps 1 to 7, offline) was implemented on 2026-11-13: section 11 records it,
+  with its deviations. PR B has not started; its prerequisites are in section 12.
 - Display only. No siren, buzzer, bed shaker, GPIO output, firmware change, physical
   acknowledgement change or new escalation logic.
 
@@ -80,7 +81,7 @@ Findings:
 - **F4. `Frame` lacks** the reading's timestamp, its trend, the data source (simulated
   or Dexcom) and whether outputs are enabled.
 - **F5. The display depends on a supervised runtime.** Without systemd supervision, a
-  runtime crash leaves the screen on "not running" until someone restarts the
+  runtime crash leaves the screen on "NO DATA" until someone restarts the
   runtime. Audit finding M6 (restart policy and watchdog) is therefore a prerequisite
   (D1).
 - **F6. Platform limits (audit finding M9).** 1 GB of RAM rules out a browser kiosk.
@@ -114,8 +115,8 @@ Two processes:
   evaluation or the heartbeat to the Uno.
 - **Least privilege:** the display runs as its own user, without network and
   credentials, and can only read the snapshot (section 3.6).
-- **Honest failure:** a separate display can show that the runtime has stopped. An
-  in-process renderer would stop with it.
+- **Honest failure:** a separate display can show that its data stopped arriving,
+  without claiming to know why. An in-process renderer would stop with it.
 
 A single snapshot file in `/run`:
 
@@ -123,7 +124,7 @@ A single snapshot file in `/run`:
   sees a partial snapshot;
 - lives on tmpfs, so live values never reach the SD card and disappear at reboot;
 - is removed by systemd (`RuntimeDirectory=`) when the runtime stops, which the
-  display shows as "not running";
+  display shows as "NO DATA";
 - is read from scratch on every refresh, so a restarted display shows the current
   state at once.
 
@@ -233,7 +234,7 @@ Every refresh classifies the snapshot. The first matching row wins:
 
 | # | Condition | Glucose area | Trend arrow |
 |---|---|---|---|
-| 1 | Snapshot missing, unreadable or rejected; older than `snapshot_max_age_s` by monotonic time; or written in the future | Full screen "NO DATA", with "Glucose Guardian is not running" or "display data invalid"; no value | none |
+| 1 | Snapshot missing, unreadable or rejected; older than `snapshot_max_age_s` by monotonic time; or written in the future | Full screen "NO DATA", with "No recent display data" (missing or expired; the display cannot tell whether the runtime stopped, stalled or lost its snapshot directory) or "display data invalid"; no value | none |
 | 2 | `glucose_current`, and the age recomputed by the display is at most `max_age_s` | Value in the level color, "mg/dL", age and reading time | shown |
 | 3 | Not current, and the last valid reading's recomputed age is at most `last_known_cutoff_s` | Value in grey, smaller, marked "LAST KNOWN", with its age shown prominently | none |
 | 4 | Not current, and no valid reading since start, or the last one is older than `last_known_cutoff_s` | "NO CURRENT DATA" with the reason; no number. "Last reading N min ago" when a reading exists | none |
@@ -345,7 +346,7 @@ Runtime unit `glucose-guardian.service` (D1):
 |---|---|
 | `User=glucose-guardian`, `Group=glucose-guardian`, `UMask=0027` | Own account; nothing it creates is world-readable |
 | `StateDirectory=glucose-guardian`, `StateDirectoryMode=0700` | Login state, readable only by the runtime |
-| `RuntimeDirectory=glucose-guardian`, `RuntimeDirectoryMode=0750`, `RuntimeDirectoryPreserve=no` | Snapshot directory readable by the group; removed on stop, which the display shows as "not running" |
+| `RuntimeDirectory=glucose-guardian`, `RuntimeDirectoryMode=0750`, `RuntimeDirectoryPreserve=no` | Snapshot directory readable by the group; removed on stop, which the display shows as "NO DATA" |
 | `LoadCredentialEncrypted=` for both credentials | Only this unit receives the credentials |
 | `Type=notify`, `WatchdogSec=`, `Restart=always`, `RestartSec=` | Supervision (audit finding M6): the tick loop pings the watchdog |
 | `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes` | Least privilege; the runtime keeps network access for Dexcom |
@@ -431,7 +432,9 @@ backoff, the login latch and `login_pending`. Rules:
   check and the service resolve the same `state_file` from the installed
   configuration.
 - **One writer at a time (F7).** The check never runs while the service is active, and
-  the service is not started while a check runs.
+  the service is not started while a check runs. The cross-process lock in
+  section 12.2 enforces this for every process. A Makefile guard alone would not
+  cover a direct Python invocation.
 - **No Dexcom contact.** The migration sends nothing.
 
 Procedure, owner-run during the approved installation; PR B documents the exact
@@ -477,7 +480,7 @@ the state is never lost.
 | Display process crash | systemd | "Display restarting" (`ExecStopPost`, best effort), then the dashboard | `Restart=always` | Unaffected |
 | Display loop hang | Missing watchdog ping | As above, after `WatchdogSec` | Watchdog kill and restart | Unaffected |
 | Rendering error | Exception in the loop; no ping after a failed render | Last good frame until the watchdog fires | Restart | Unaffected |
-| Runtime crash or stop | Snapshot removed, or older than `snapshot_max_age_s` | "NO DATA: Glucose Guardian is not running" | Runtime unit restart (D1) | The Uno's link-lost demand (audible from M6) |
+| Runtime crash or stop | Snapshot removed, or older than `snapshot_max_age_s` | "NO DATA: No recent display data" | Runtime unit restart (D1) | The Uno's link-lost demand (audible from M6) |
 | Runtime loop stalled, process alive | Snapshot ages | As above | Runtime watchdog (D1) | As above |
 | Snapshot corrupt or of another schema | Strict reader | "NO DATA: display data invalid" | Next valid snapshot | Unaffected |
 | Dexcom outage, rate limit, deferred or blocked login | `source_status` and the `acquisition` fault | Connection line; the value turns "LAST KNOWN", then "NO CURRENT DATA" after the cutoff | Existing M4 behavior; a blocked login needs the operator | Existing faults |
@@ -589,11 +592,13 @@ the real Uno follows later as a separate, approved step.
 
 Open hardware questions:
 
-- Desktop or headless image (D3): a running compositor would own the display.
+- Desktop or headless image (D3): headless as of 2026-11-13 (section 12.1). A
+  compositor started later would own the display.
 - The Waveshare model and revision, its reported modes, and any boot configuration it
   needs.
 - Whether the running kernel provides an 800×480 framebuffer for the HDMI output, and
-  in which pixel format.
+  in which pixel format. `/dev/fb0` was absent on 2026-11-13 with no display
+  connected; whether it appears with the panel attached is unknown.
 - Whether the display user can switch the console to graphics mode through `TTYPath=`.
 - What the panel shows when the HDMI signal stops or the Pi loses power.
 - The panel's power source, and whether it causes under-voltage.
@@ -632,7 +637,7 @@ Open hardware questions:
 
 Two pull requests (D10). Each step is a small increment with its own tests.
 
-PR A, offline (CI only, nothing on the Pi):
+PR A, offline (CI only, nothing on the Pi), implemented on 2026-11-13 (section 11):
 
 1. **Trend with its reading:** `Reading.trend`, set by `DexcomShareProvider` and the
    scenarios; `latest_trend` removed. Done when the F1 tests pass and the alarm tests
@@ -652,7 +657,7 @@ PR A, offline (CI only, nothing on the Pi):
    redraw on change, image sink, systemd notification, `--blank` and signal handling;
    end-to-end tests with the simulated service.
 
-PR B, Pi integration:
+PR B, Pi integration, after the prerequisites in section 12:
 
 8. **Framebuffer output and test pattern,** with console graphics mode, tested against
    fakes.
@@ -677,7 +682,7 @@ PR B, Pi integration:
 |---|---|---|---|
 | D1 | Runtime supervision in M5 | Approved | Runtime unit in section 3.6; persisting the retained alarm level stays before M6 outputs |
 | D2 | Rendering stack | Pillow approved; the framebuffer backend is conditional | G1 decides the output backend; fallbacks in section 3.2 |
-| D3 | Pi image | Debian 13 aarch64 confirmed; desktop or headless pending | Recorded in G1; a desktop must be disabled, or the fallback must take DRM master |
+| D3 | Pi image | Debian 13 aarch64 confirmed; desktop or headless pending. Update 2026-11-13: headless (`multi-user.target`, no display manager active; section 12.1) | Recorded again in G1; a desktop must stay disabled, or the fallback must take DRM master |
 | D4 | Font | Approved: DejaVu Sans Bold (`fonts-dejavu-core`) | Section 3.5 |
 | D5 | Colors, labels, "<40" and ">400" | Approved provisionally; the LOW and HIGH encoding is not yet live-verified | Revisit when a live LOW or HIGH confirms the encoding |
 | D6 | Last known value | Modified: a configurable display cutoff, provisionally 30 minutes; after it, the number is hidden and the screen shows "NO CURRENT DATA". No alarm engine change | `last_known_cutoff_s` (sections 3.4 and 3.7) |
@@ -688,8 +693,9 @@ PR B, Pi integration:
 
 Still open:
 
-- desktop or headless (D3);
-- the G1 result and, if needed, the fallback choice;
+- the G1 result and, if needed, the fallback choice; `/dev/fb0` was absent on
+  2026-11-13 with no display connected (section 12.1);
+- the cross-process lock of section 12.2;
 - the hardware questions in section 6.
 
 ## 10. Out of scope
@@ -698,3 +704,219 @@ Siren, buzzer, bed shaker, GPIO outputs, firmware changes, physical acknowledgem
 new escalation logic, touch input, trend-based alerts, persisting readings, persisting
 the retained alarm level (before M6 outputs), backup power (M7), any Omnipod
 interaction and any write to Dexcom.
+
+## 11. PR A implementation record (2026-11-13)
+
+Steps 1 to 7 of section 8, offline. Nothing was deployed, flashed or sent to Dexcom;
+no real configuration or state file was touched.
+
+| Module | Change |
+|---|---|
+| `providers.py` | `Reading.trend` (`Trend` or `None`), a required field |
+| `simulation.py` | Every segment has a trend; scenario readings carry it |
+| `share_client.py` | `DexcomShareProvider` returns the entry's trend inside the `Reading`; `latest_trend` removed |
+| `display.py` | `Source`; `Frame` gains `reading_time`, `trend`, `source`, `source_status`, `outputs_enabled`; `build_frame` refuses a Dexcom source without a status and a simulated source with one; `FanOutDisplay` |
+| `runtime.py` | New required arguments `source`, `source_status` and `outputs_enabled`. The frame is built inside the display guard, so a frame error counts as a display error |
+| `config.py` | Required `[display]` table; `Config.display` and `Config.outputs_enabled` |
+| `snapshot.py` | New: schema 1, atomic writer, strict reader, `SnapshotDisplay` |
+| `service.py` | `build_display`; `Acquisition` dataclass with the source and its status callable |
+| `screen_model.py` | New: the pure classifier of section 3.4 |
+| `screen_render.py` | New: the Pillow renderer |
+| `screen.py` | New: the display process |
+| `notify.py` | New: systemd notifications over a Unix datagram socket |
+| `preview.py` | New: synthetic previews for `make display-preview` |
+| `bench/checks.py` | Passes the new runtime arguments |
+
+Implementation details:
+
+- **Trend (F1):** the trend travels inside the `Reading` it arrived with. A stale or
+  future-dated newer entry can no longer pair its trend with the value shown, because
+  the frame takes the value, time and trend from the same last valid reading. `Trend`
+  stays in `dexcom_share.py`; `providers.py` imports it.
+- **Snapshot writer:**
+  - removes a leftover partial file and creates a new one with `O_EXCL`, mode 0640
+    (also forced with `fchmod`);
+  - writes, then renames over the target; the rename replaces a symlink rather than
+    following it;
+  - does not `fsync`: the file lives on tmpfs, and the rename alone is atomic for
+    readers;
+  - `encode` parses its own output before writing, so the writer can never publish a
+    snapshot that the reader would reject.
+- **Snapshot reader:**
+  - opens with `O_NOFOLLOW` and `O_NONBLOCK`, accepts regular files only, and reads at
+    most 4096 bytes;
+  - rejects duplicate keys, `NaN` and `Infinity`;
+  - requires the exact field set, strict types (a boolean is never a number), known
+    enum values and a UTC ISO 8601 time;
+  - checks consistency: the value, time and age are present together; a trend or a
+    current level needs a reading; the status is null exactly for a simulated source.
+- **Screen model:** as in section 3.4, with the additions listed under Deviations.
+  Ages use minute granularity, so the screen redraws at most once a minute unless
+  something changes.
+- **Renderer:**
+  - fixed, disjoint layout boxes;
+  - text shrinks by binary search down to 12 px, then is shortened with an ellipsis;
+  - the alerts line drops trailing items with "+N more";
+  - arrows are polygons rotated per trend;
+  - the font is loaded once from its file.
+- **Display process:** `python -m glucose_guardian.screen --config <file> --png <file>
+  [--blank]`.
+  - It sends `READY=1` after the first frame, `WATCHDOG=1` after each completed loop
+    and `STOPPING=1` on SIGTERM or SIGINT.
+  - A render or output error ends the process with status 1 before the next watchdog
+    ping.
+  - A missing, invalid or expired snapshot is a screen state, never an error.
+  - It logs state changes, never values.
+  - `--blank` writes the "Display restarting" frame once.
+- **Notifications:** `notify.py` uses only `AF_UNIX` datagram sockets (path or
+  abstract `NOTIFY_SOCKET`). The network-import test lists it with `socket`, and a
+  further test confirms that it uses only Unix sockets.
+- **Previews:** `make display-preview` classifies 30 synthetic snapshots through the
+  real classifier and renders them with the real renderer. It also renders the
+  "Display restarting" frame, writing 31 PNGs to `build/display-preview/` (Git-ignored).
+- **Configuration:**
+  - `config/example.toml` writes its development snapshot to
+    `/tmp/glucose-guardian-display.json`;
+  - `config/example-dexcom-share.toml` uses `/run/glucose-guardian/display.json`;
+  - both name DejaVu Sans Bold and `/dev/fb0`. The `framebuffer` key is validated but
+    unused until PR B.
+- **Dependency:** `pillow==13.0.0` (wheels for Python 3.11 to 3.13; aarch64 wheel for
+  Python 3.13 confirmed). CI installs `fonts-dejavu-core`.
+
+Deviations from the approved design:
+
+1. **Stricter snapshot acceptance:** a snapshot whose source or outputs flag differs
+   from the display's own configuration is shown as "NO DATA: display data invalid".
+2. **LAST KNOWN layout:** after reviewing the previews, the age moved into the tag
+   ("LAST KNOWN · 12 min ago", bright text), and the unit and reading time into the
+   right column. The retained alarm level got the full width of its row, where it had
+   been shrunk to small text.
+3. **Connection colors:** `ok` and `starting` muted, the other error statuses amber
+   (warning), `auth_blocked` red. The plan specified only the red.
+4. **Simulated source:** the connection line reads "Source: simulation".
+5. **Device limits:** values at or below 39 show as "<40" and at or above 401 as
+   ">400". This matters only for simulated values, because the Share parser accepts
+   only 39 to 401.
+6. **"Display restarting" frame:** no clock and no markers, so a stuck restarting
+   screen cannot show a plausible time.
+
+Review correction (PR #10, 2026-11-13):
+
+- A missing or expired snapshot showed "Glucose Guardian is not running". The display
+  cannot know that: the runtime may have stopped, stalled, crashed or lost its
+  snapshot directory, or may still be starting. Both cases now show "NO DATA: No
+  recent display data".
+- The NO DATA state, the suppressed value and trend, and the thresholds
+  (`snapshot_max_age_s`, written-in-the-future) are unchanged.
+- The preview case was renamed `no-data-no-recent-data`.
+- The end-to-end test helper now reads process output on a thread with a real
+  deadline. Before, a missing log line blocked the test instead of failing it.
+
+Shutdown correction (PR #10, 2026-11-14):
+
+- One CI run hung in a service test after SIGTERM. The runtime and the display
+  process stopped through a signal handler that called `threading.Event.set()`; when
+  the signal landed while the main thread held the Event's lock inside `Event.wait`,
+  the handler blocked on that lock forever.
+- Both processes now use `shutdown.stop_on_signals()`: the handler writes one byte to
+  a non-blocking self-pipe and the wait polls it. `wait(timeout_s) -> bool` and its
+  timing are unchanged. Details are in the development log.
+
+Verification:
+
+- **Python 3.11.18 and 3.13.18:** ruff clean, mypy strict clean (37 files), pytest
+  1051 passed after the shutdown correction (1032 after the review correction, 1025
+  before it, 761 before PR A).
+- **Native firmware tests:** 27 of 27; firmware unchanged.
+- **Mutation check:** 19 of 19 mutations of the new safety rules fail the tests. A first
+  run found one survivor: drawing any value in the live layout hid the LAST KNOWN
+  label. A test now requires the label.
+- **Development machine:** about 3 ms per rendered frame and 76 MiB peak memory for
+  the preview run. The Pi figures are measured in H10.
+
+## 12. PR B prerequisites
+
+### 12.1 Raspberry Pi inspection (owner-reported, 2026-11-13)
+
+| Check | Result |
+|---|---|
+| `systemctl get-default` | `multi-user.target` |
+| `systemctl is-active display-manager` | `inactive` |
+| `/dev/dri/card0`, `/dev/dri/renderD128` | present |
+| `/dev/fb0` | not present |
+| Waveshare display | still packaged, not connected or identified |
+
+- **The Pi boots headless, and no display manager runs.** This answers the
+  desktop-or-headless part of D3 for the current image.
+- **The DRM devices exist, but no legacy framebuffer does.** It must not be assumed
+  that `/dev/fb0` appears when HDMI is connected. G1 first establishes whether the
+  kernel provides framebuffer emulation for the panel. If it does not, the KMS/DRM
+  fallbacks of section 3.2 apply, which the present DRM devices make viable.
+- **The PR A architecture stays unchanged:** only the output step depends on this.
+
+### 12.2 Cross-process lock for the Dexcom login state (mandatory)
+
+Required before the service and the connectivity check share a state file, and before
+continuous live monitoring starts. It changes M4 code (`share_state.py`) and needs its
+own review.
+
+- **Problem (F7):** `AuthStateStore` loads the state once at startup and replaces the
+  file on each change. Two processes can therefore overwrite each other's cooldown,
+  rate-limit backoff or block. A Makefile guard does not stop a direct
+  `python -m glucose_guardian.share_check`.
+- **Lock:** an exclusive, non-blocking `flock` (`LOCK_EX | LOCK_NB`) on a dedicated
+  lock file next to the state file (`<state_file>.lock`, mode 0600, opened with
+  `O_CLOEXEC` so no child process inherits it).
+- **Who takes it:**
+  - every process that builds an `AuthStateStore` takes the same lock: the runtime,
+    `share_check` and `share_state unblock`;
+  - `share_state status` and `path` only read, and need no lock; the atomic rename
+    gives them a consistent file.
+- **Lifetime:** the lock is taken before the state file is read and held until the
+  process exits. It therefore covers the whole time the state is held in memory, not
+  only single writes.
+- **Fail closed:**
+  - a process that cannot take the lock refuses before it reads the state or sends
+    any request;
+  - `share_check` and `unblock` exit with a message that another process holds the
+    login state;
+  - the runtime exits with status 2, and systemd retries after `RestartSec`;
+  - failing to open the lock file blocks login exactly like an unreadable state file.
+- **Crashes and stale locks:** a `flock` lock belongs to the open file and is released
+  by the kernel when the holder exits for any reason, including SIGKILL, a crash or
+  the OOM killer; a power loss ends the boot.
+  - There are no PID files, timeouts or manual cleanup.
+  - The lock file is never deleted: deleting it while held would let another process
+    lock a new file.
+- **Kept:** every existing fail-closed rule (unreadable state, `login_pending`, the
+  login latch). The Makefile refusal while the service runs stays as an early,
+  friendly check.
+- **Tests (PR B):**
+  - a second process refuses while the first holds the lock;
+  - a SIGKILLed holder releases it;
+  - `unblock` refuses while the service runs;
+  - no code path removes the lock file.
+
+### 12.3 Configuration on the Pi
+
+`[display]` is now required. The Pi's existing `config/local.dexcom.toml` lacks it, so
+once this code reaches the Pi, the following stop with a configuration error that
+names `[display]` until the `[display]` block from
+`config/example-dexcom-share.toml` is added:
+
+- `make dexcom-status`;
+- `make dexcom-check`;
+- the Dexcom state line of `make status`.
+
+Nothing was changed on the Pi.
+
+### 12.4 Other PR B items
+
+- **Packages:** install `fonts-dejavu-core` on the Pi. Without the font the display
+  process refuses to start (status 2).
+- **G1, then the output backend:** step 9, then the approved backend.
+- **Runtime unit:** the runtime sends `WATCHDOG=1` from its tick loop through
+  `notify.py`.
+- **Remaining PR B work:** the units, accounts and permissions of section 3.6, the
+  Makefile changes of step 10, the state migration of section 3.8 and the Pi validation
+  of section 6.

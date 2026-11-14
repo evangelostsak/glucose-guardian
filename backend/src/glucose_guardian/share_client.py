@@ -25,7 +25,6 @@ from .dexcom_share import (
     ShareSessionExpired,
     ShareStatus,
     ShareTransportError,
-    Trend,
     authenticate_body,
     check_request,
     classify_error,
@@ -327,7 +326,6 @@ class DexcomShareProvider:
         self._minutes, self._max_count = window(max_age_s)
         self._last: ShareEntry | None = None
         self.status = ShareStatus.STARTING
-        self.latest_trend: Trend | None = None
 
     def read(self, now: datetime) -> Reading | None:
         try:
@@ -347,8 +345,7 @@ class DexcomShareProvider:
                 raise ShareProtocolError("reading changed for the same timestamp")
             return None
         self._last = entry
-        self.latest_trend = entry.trend
-        return Reading(entry.mg_dl, entry.timestamp)
+        return Reading(entry.mg_dl, entry.timestamp, entry.trend)
 
     def _report(self, status: ShareStatus, detail: str) -> None:
         if status is not self.status:

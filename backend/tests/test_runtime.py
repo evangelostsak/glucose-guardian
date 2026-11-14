@@ -267,7 +267,7 @@ def test_run_stops_promptly_with_a_blocked_fetch():
     class Blocking:
         def read(self, now):
             release.wait()
-            return Reading(110, now)
+            return Reading(110, now, None)
 
     def wait(timeout: float) -> bool:
         clock[0] += timeout

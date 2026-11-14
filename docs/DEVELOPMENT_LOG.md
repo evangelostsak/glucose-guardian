@@ -1,5 +1,269 @@
 # Development log
 
+## 2026-11-14 — PR #10: SIGTERM and SIGINT shutdown deadlock
+
+Nothing contacted Dexcom; nothing was deployed or flashed; no credential, configuration
+or state file was touched. PR B was not started.
+
+### Defect
+
+- **Symptom:** CI run 43498783112 on `ae3a031` (job `python (3.11)`) failed one test,
+  `test_simulated_service_writes_a_simulated_snapshot`: after SIGTERM the service did
+  not exit, and `communicate(timeout=10)` expired. The other jobs and the other CI run
+  on the same commit passed.
+- **Cause:** `service.main` and `screen.main` installed
+  `lambda signum, frame: stop.set()` for SIGTERM and SIGINT, with
+  `stop = threading.Event()`, and the loops waited in `stop.wait(timeout)`. CPython
+  runs a Python signal handler in the main thread between bytecodes. `Event.wait`
+  holds the Event's condition lock, a non-reentrant `threading.Lock`, while it checks
+  the flag and after its timed wait. A signal in that window runs `Event.set`, which
+  waits for the same lock that the interrupted frame holds, so the main thread waits on
+  itself forever.
+- **Evidence:** the `faulthandler` stack of a hung process ends in the handler, then
+  `Event.set`, then `Condition.__enter__`, inside `Event.wait`. A tight loop
+  (`while not stop.wait(0)`) hung in 38 of 60 trials on Python 3.11.18 and 13 of 30 on
+  3.13.18, and 9 of 20 on 3.13.18 during this task. With the service's real timing the
+  window is small: 0 hangs in 460 local attempts, 1 in CI.
+- **Impact:** a stop could hang the runtime or the display process until it was
+  killed. A hung runtime sends no heartbeats, so the Uno demands its link-lost alarm
+  and the display turns to NO DATA; the failure direction is not silent, but a
+  restart under systemd (PR B) would wait for the stop timeout.
+
+### Correction
+
+- **New module `shutdown.py`:**
+  - `StopRequest` owns a pipe from `os.pipe2(O_NONBLOCK | O_CLOEXEC)`.
+  - Its handler `request` makes one `os.write` of one byte and ignores `OSError`; a
+    full pipe already means that a stop was requested. It takes no lock and does not
+    log.
+  - `wait(timeout_s) -> bool` polls the read end with `select.poll`. CPython rounds the
+    millisecond timeout up, and a negative timeout counts as 0, as with `Event.wait`.
+    The pipe is never drained, so every wait after a request returns True at once,
+    like a set Event.
+  - EINTR: under PEP 475 `poll` retries after the handler has run, and the byte the
+    handler wrote ends the retried poll at once.
+  - `stop_on_signals()` installs the handler for SIGTERM and SIGINT. An `ExitStack`
+    restores each previous handler and then closes both descriptors on every exit
+    path: normal return, exception, or a failure while installing.
+- **`service.main` and `screen.main`** use `stop_on_signals()`. The "runtime started"
+  log line moved inside the context, so it still marks installed handlers. Both
+  modules no longer import `threading` or `signal`.
+- **Unchanged:** Dexcom authentication, alarm evaluation, heartbeats, the serial
+  protocol, display rendering, physical outputs, the `wait(timeout_s) -> bool`
+  contract and its timing. No thread, busy loop or dependency was added.
+- **Not changed:** `share_simulator.main`, the synthetic Dexcom Share simulator, uses
+  the same Event pattern. It was outside the approved scope and is listed as a gap.
+
+### Tests
+
+- **Shared helper `tests/processes.py`:** `Watched`, moved from `test_screen.py`,
+  merges stdout and stderr, gives the child a stdin pipe and bounds every wait by a
+  deadline (10 s); every caller kills the child in `finally`. `open_pipes()` lists the
+  pipe descriptors of the test process.
+- **New `tests/test_shutdown.py` (12 tests):**
+  - the wait timeout without a request, at 0 and below 0;
+  - a request makes every later wait return True at once;
+  - both descriptors are non-blocking and close-on-exec, and `close` closes both and
+    can run twice;
+  - more requests than the pipe holds neither block nor raise;
+  - handlers restored and descriptors closed after a normal exit and after an
+    exception;
+  - SIGTERM and SIGINT during a 30 s wait end it promptly;
+  - 1000 alternating signals inside the context;
+  - **deterministic reproduction:** a child running the old handler while it holds the
+    Event's lock never returns from the handler (bounded by 2 s, then killed);
+  - **stress:** 40 child processes in a tight `wait(0)` loop, stopped alternately by
+    SIGTERM and SIGINT, each must stop within 10 s;
+  - **burst:** 200 alternating signals to one waiting child, which stops exactly once.
+- **`test_service.py`:** every subprocess test uses `Watched` with deadlines and a
+  `finally` kill, including `test_simulated_service_writes_a_simulated_snapshot`. New:
+  a clean stop on each signal; a stop by each signal during a 60 s tick wait; six rapid
+  start and stop cycles. The crash test now checks both handlers and the pipes.
+- **`test_screen.py`:** a stop by each signal during a 60 s refresh wait; six rapid
+  start and stop cycles; the module probe got a 60 s timeout.
+- **Against the old pattern:** with `StopRequest` rebuilt on `threading.Event`, the
+  stress test and the burst test failed in 5 of 5 runs on each Python version, and the
+  deterministic test reproduces the deadlock on every run.
+- **Python 3.11.18 and 3.13.18** (`make lint typecheck test`): ruff clean, mypy strict
+  clean (37 files), pytest 1051 passed on both.
+- **Repeated runs:**
+  - the 24 shutdown-related tests, 15 times on each version: all passed;
+  - `test_shutdown.py` four at a time in parallel, three rounds: all passed;
+  - the earlier service reproduction (200 SIGTERMs at varied delays, eight in
+    parallel): 0 hangs on each version.
+
+### Unresolved
+
+- If the kernel delivers a stop signal to a worker thread, CPython runs the handler
+  only when the main thread next runs bytecode, so the stop can wait for the current
+  `tick_s` or `refresh_s`. This was also true before.
+- A second signal after shutdown has begun reaches the restored handler: SIGTERM ends
+  the process with the default action, SIGINT raises `KeyboardInterrupt`. This is
+  unchanged.
+- The first full 3.11 run printed one `BrokenPipeError` line outside any test result;
+  every test passed, three more full runs did not show it, and its source was not
+  found.
+- Not run on the Pi.
+
+## 2026-11-13 — PR #10 review: neutral wording for missing or expired snapshots
+
+### Change
+
+- **Wording:** `screen_model` showed "Glucose Guardian is not running" for a missing or
+  expired snapshot. The display process cannot know that: the runtime may have
+  stopped, stalled or crashed, or lost its snapshot directory, or may still be
+  starting. Both cases now show "NO DATA: No recent display data" (`NO_RECENT_DATA`).
+- **Unchanged:** the NO DATA state, the suppressed value, trend, level, age and
+  connection line, and the thresholds (`snapshot_max_age_s`, written-in-the-future).
+- **Preview:** the case was renamed `no-data-no-recent-data`.
+- **Test helper:** the end-to-end helper `expect()` read stderr with a blocking
+  `readline()`, so a log line that never came hung the test instead of failing it. It
+  was found when the new tests were run against the old wording. Output is now read on
+  a thread into a queue with a real deadline, and a new test proves that a missing
+  line fails within its timeout.
+- **Docs:** the M5 plan (sections 3.1, 3.4, 3.6 and 4, and the review correction in
+  section 11), SAFETY and PROJECT_STATUS.
+
+### Specification check
+
+Compared mechanically with the approved plan:
+
+- the snapshot fields equal the 18 fields of section 3.3;
+- all ten connection texts equal the table in section 3.4;
+- the `[display]` keys equal section 3.7;
+- every marker and state headline is present.
+
+### Tests
+
+- **New:**
+  - `test_missing_or_expired_snapshot_shows_no_recent_data_without_claiming_a_stop`
+    (5 cases: missing; expired by 1 ms and by an hour; an expired falling urgent low;
+    an expired last-known reading with a blocked login);
+  - `test_no_screen_claims_to_know_the_runtime_stopped` (every status and age);
+  - `test_expect_fails_in_time_when_a_line_never_comes`.
+- **Updated:** the expiry-boundary, no-data, loop and end-to-end tests.
+- **Against the old wording:** 11 tests fail, none hang.
+- **Python 3.11.18 and 3.13.18** (`make lint typecheck test`): ruff clean, mypy strict
+  clean (36 files), pytest 1032 passed on both.
+
+## 2026-11-13 — M5 PR A: offline display software
+
+Steps 1 to 7 of section 8 of the [M5 plan](plans/2026-11-13-m5-hdmi-display.md), whose
+section 11 records the details and deviations. Nothing contacted Dexcom; nothing was
+deployed or flashed; no real configuration, credential or state file was touched. PR B
+was not started.
+
+### Changes
+
+- **Step 1, trend with its reading (F1):** `Reading.trend` is a required field.
+  `DexcomShareProvider` puts the entry's trend in the `Reading`, and `latest_trend` is
+  removed. Scenario segments carry synthetic trends.
+- **Step 2, frame:** `Frame` gains `reading_time`, `trend`, `source`, `source_status`
+  and `outputs_enabled`. `build_frame` refuses a source and status that do not match.
+  The runtime builds the frame inside its display guard.
+- **Step 3, source status:** `service.Acquisition` carries the source and a status
+  callable: `DexcomShareProvider.status`, or none for simulated data. No second Dexcom
+  client or session exists.
+- **Step 4, snapshot:**
+  - `snapshot.py` provides the schema-1 atomic writer (mode 0640, at most 4096 bytes,
+    no `fsync`), the strict reader and `SnapshotDisplay`;
+  - `FanOutDisplay` is in `display.py`;
+  - the required `[display]` table is in `config.py` and both examples;
+  - `service.build_display` refuses a missing snapshot directory with status 2.
+- **Step 5, screen model:** `screen_model.py` classifies a snapshot into LIVE, LAST
+  KNOWN, NO CURRENT DATA (provisional cutoff 1800 s) or NO DATA. Freshness is
+  recomputed on the monotonic clock. It also builds the connection line, reasons,
+  alerts, markers and the clock.
+- **Step 6, renderer:** `screen_render.py` draws the 800×480 dashboard with Pillow
+  and DejaVu Sans Bold: fit-to-box text, polygon arrows and fixed layout boxes.
+  `preview.py` and `make display-preview` write 31 synthetic PNGs.
+- **Step 7, display process:** `screen.py` provides the refresh loop, redraw on
+  change, PNG output, `--blank`, signal handling and systemd notifications through the
+  new `notify.py`.
+- **Dependencies and CI:** `pillow==13.0.0`. CI installs `fonts-dejavu-core` before
+  `make setup`.
+- **Docs:** the M5 plan (status, sections 11 and 12, D3, open items), ARCHITECTURE
+  (modules, `[display]`, a new *Display* section), SAFETY (seven display rows),
+  PROJECT_STATUS, README, DEXCOM_SHARE (`[display]` table and the effect on the Pi's
+  existing configuration).
+
+### Decisions
+
+- **One source for the snapshot path:** the display process loads the same
+  configuration as the runtime.
+- **Stricter acceptance:** a snapshot from another source or outputs setting than the
+  display's configuration counts as invalid, so it shows as NO DATA.
+- **LAST KNOWN layout:** after reviewing the previews, the age moved into the tag and
+  the retained alarm level got a full-width row (deviation 2 in plan section 11).
+- **Development snapshot:** `config/example.toml` writes it to
+  `/tmp/glucose-guardian-display.json`. `harness.write_config` redirects it into each
+  test's temporary directory, so tests never touch a shared path.
+- **Pi inspection (owner-reported, recorded in plan section 12.1):** headless,
+  `/dev/fb0` absent, DRM devices present. The architecture is unchanged; G1 decides the
+  output step.
+- **Cross-process lock:** the lock for the Dexcom login state is specified in plan
+  section 12.2 as a mandatory PR B prerequisite and was not implemented: no PR A
+  component needs it.
+
+### Tests
+
+- **New:**
+  - `test_trend.py` (15): F1 regressions for stale and future-dated entries, scenario
+    trends, and identical alarm results with and without trends in all 11 scenarios;
+  - `test_snapshot.py` (71);
+  - `test_screen_model.py` (57, including an invariant check over more than 1000
+    snapshots);
+  - `test_screen_render.py` (80);
+  - `test_screen.py` (12, including an end-to-end run with the real service: killing
+    the runtime shows NO DATA within `snapshot_max_age_s + refresh_s` plus margin,
+    recovery after a restart, killing the display leaves the runtime writing, and the
+    display modules load no Dexcom client, credentials, state or network modules);
+  - `test_preview.py` (3).
+- **Updated:**
+  - `test_config.py`: `[display]` cases;
+  - `test_display.py`;
+  - `test_service.py`: build_display, the missing snapshot directory, a simulated
+    snapshot;
+  - `test_share_runtime.py`: the trend stays with its reading through the Share
+    simulator;
+  - `test_share_readonly.py`: `notify.py` in the network allowlist, Unix sockets only;
+  - `test_makefile.py`: `display-preview`;
+  - the existing `Reading` constructions.
+- **Python 3.11.18 and 3.13.18** (`make lint typecheck test` with `VENV` set to
+  scratch virtual environments with `pillow==13.0.0`): ruff clean, mypy strict clean
+  (36 files), pytest 1025 passed on both (761 before).
+- **Firmware:** `make firmware-test` 27 of 27; firmware unchanged and not rebuilt.
+- **Mutation check:** 19 of 19 mutations fail the tests:
+  - the frame taking the newest instead of the last valid reading;
+  - dropping the `max_age_s` recheck, the cutoff, the snapshot expiry or the
+    future-write check;
+  - a colored or trended LAST KNOWN;
+  - dropping the no-response rule or the "<40" mapping;
+  - snapshot mode 0644, or no `fchmod`;
+  - dropping the source and status consistency, `O_NOFOLLOW` or the size bound;
+  - a fan-out that stops at the first failure;
+  - a watchdog ping before the render;
+  - the renderer drawing a non-live value in the live layout (a survivor of the first
+    run, now caught by a LAST KNOWN label test);
+  - dropping the cutoff configuration check;
+  - the Share provider dropping the trend.
+- **Previews:** `make display-preview` wrote 31 PNGs to `build/display-preview/`, all
+  synthetic, and they were reviewed visually.
+- **Development machine:** about 3 ms per rendered frame and 76 MiB peak memory.
+
+### Unresolved
+
+- **PR B prerequisites** (plan section 12):
+  - the cross-process lock;
+  - G1 on the real panel, with `/dev/fb0` currently absent;
+  - the `[display]` table in the Pi's `config/local.dexcom.toml`. Until it is added,
+    `make dexcom-status` and `make dexcom-check` stop with a configuration error;
+  - `fonts-dejavu-core` on the Pi.
+- **Frozen frames:** a kernel, GPU, driver, HDMI or panel freeze can keep the last
+  frame on the panel (residual risk).
+- **The working tree's `.venv`** (Python 3.14.4) still lacks the lint tools and
+  Pillow. `make setup` will install Pillow there.
+
 ## 2026-11-13 — PR #9 design review: M5 owner decisions
 
 Documentation only: the M5 plan and the documents that reference it. No code,

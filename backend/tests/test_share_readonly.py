@@ -287,5 +287,12 @@ def test_only_the_share_client_can_open_network_connections():
     users = {str(path.relative_to(SOURCE)): network_imports(path)
              for path in sorted(SOURCE.rglob("*.py")) if network_imports(path)}
     assert users == {"share_client.py": {"http.client", "socket", "ssl", "urllib.request"},
-                     "service.py": {"ssl"}}
+                     "service.py": {"ssl"}, "notify.py": {"socket"}}
+
+
+def test_the_systemd_notifier_uses_only_unix_sockets():
+    tree = ast.parse((SOURCE / "notify.py").read_text())
+    attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+                  and isinstance(node.value, ast.Name) and node.value.id == "socket"}
+    assert attributes == {"socket", "AF_UNIX", "SOCK_DGRAM", "SOCK_CLOEXEC"}
 

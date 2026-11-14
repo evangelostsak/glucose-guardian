@@ -59,7 +59,7 @@ check_pi = [[ '$(PI_USER)' =~ ^[A-Za-z0-9._-]+$$ && '$(PI_HOST)' =~ ^[A-Za-z0-9.
 .PHONY: help setup setup-firmware lint typecheck test check \
 	firmware-build firmware-test firmware-flash \
 	bench-setup bench-discover bench-bootloader bench-run bench-run-interactive bench-watchdog bench-collect \
-	simulator simulate \
+	simulator simulate display-preview \
 	status pi-sync pi-setup pi-status \
 	dexcom-config dexcom-credentials dexcom-credentials-check dexcom-credentials-rotate \
 	dexcom-status dexcom-check \
@@ -173,6 +173,11 @@ simulate: ## Run the service with CONFIG until Ctrl+C; outputs stay off and syst
 	@$(need_venv)
 	@test -f $(CONFIG_FILE) || { echo "$(CONFIG_FILE) not found" >&2; exit 2; }
 	env -u CREDENTIALS_DIRECTORY $(VPY) -m glucose_guardian.service --config $(CONFIG_FILE)
+
+display-preview: ## Render synthetic dashboard PNGs with CONFIG's [display] font into build/display-preview
+	@$(need_venv)
+	@test -f $(CONFIG_FILE) || { echo "$(CONFIG_FILE) not found" >&2; exit 2; }
+	$(VPY) -m glucose_guardian.preview --config $(CONFIG_FILE) --out $(ROOT)/build/display-preview
 
 ##@ Raspberry Pi
 status: ## [Pi or laptop] Read-only host report: OS, Python, clock sync, venv, tools, staged images, Dexcom files
