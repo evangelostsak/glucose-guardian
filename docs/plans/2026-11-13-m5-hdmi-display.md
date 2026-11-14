@@ -812,10 +812,21 @@ Review correction (PR #10, 2026-11-13):
 - The end-to-end test helper now reads process output on a thread with a real
   deadline. Before, a missing log line blocked the test instead of failing it.
 
+Shutdown correction (PR #10, 2026-11-14):
+
+- One CI run hung in a service test after SIGTERM. The runtime and the display
+  process stopped through a signal handler that called `threading.Event.set()`; when
+  the signal landed while the main thread held the Event's lock inside `Event.wait`,
+  the handler blocked on that lock forever.
+- Both processes now use `shutdown.stop_on_signals()`: the handler writes one byte to
+  a non-blocking self-pipe and the wait polls it. `wait(timeout_s) -> bool` and its
+  timing are unchanged. Details are in the development log.
+
 Verification:
 
-- **Python 3.11.18 and 3.13.18:** ruff clean, mypy strict clean (36 files), pytest
-  1032 passed after the review correction (1025 before it, 761 before PR A).
+- **Python 3.11.18 and 3.13.18:** ruff clean, mypy strict clean (37 files), pytest
+  1051 passed after the shutdown correction (1032 after the review correction, 1025
+  before it, 761 before PR A).
 - **Native firmware tests:** 27 of 27; firmware unchanged.
 - **Mutation check:** 19 of 19 mutations of the new safety rules fail the tests. A first
   run found one survivor: drawing any value in the live layout hid the LAST KNOWN
