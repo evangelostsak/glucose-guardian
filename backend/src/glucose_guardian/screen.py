@@ -3,9 +3,7 @@ import argparse
 import contextlib
 import logging
 import os
-import signal
 import sys
-import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -19,6 +17,7 @@ from .display import Source
 from .notify import Notifier, notifier_from_environment
 from .screen_model import ScreenModel, ScreenSettings, ScreenState, classify, restarting
 from .screen_render import Renderer
+from .shutdown import stop_on_signals
 from .snapshot import Snapshot, SnapshotProblem, read_snapshot
 
 log = logging.getLogger("glucose_guardian.screen")
@@ -110,20 +109,15 @@ def main(argv: list[str]) -> int:
         sink.show(renderer.render(restarting()).image)
         return EXIT_STOPPED
     display = config.display
-    stop = threading.Event()
-    handlers = {sig: signal.signal(sig, lambda signum, frame: stop.set())
-                for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
-        run(snapshot_file=display.snapshot_file, settings=screen_settings(config, display),
-            refresh_s=display.refresh_s, renderer=renderer, sink=sink,
-            notifier=notifier_from_environment(os.environ), monotonic=time.monotonic,
-            now_local=lambda: datetime.now().astimezone(), wait=stop.wait)
+        with stop_on_signals() as stop:
+            run(snapshot_file=display.snapshot_file, settings=screen_settings(config, display),
+                refresh_s=display.refresh_s, renderer=renderer, sink=sink,
+                notifier=notifier_from_environment(os.environ), monotonic=time.monotonic,
+                now_local=lambda: datetime.now().astimezone(), wait=stop.wait)
     except Exception:
         log.exception("display crashed")
         return EXIT_CRASHED
-    finally:
-        for sig, handler in handlers.items():
-            signal.signal(sig, handler)
     log.info("display stopped")
     return EXIT_STOPPED
 
