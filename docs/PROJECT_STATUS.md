@@ -212,7 +212,11 @@ of the [M5 plan](plans/2026-11-13-m5-hdmi-display.md)). Steps 1 to
   login protections.
 - **Review correction (PR #10):** a missing or expired snapshot shows "NO DATA: No
   recent display data" instead of claiming that the runtime is not running.
-- **Tests:** 1032 in total, 271 more than before PR A. 19 of 19 mutations of the new
+- **Shutdown correction (PR #10):** SIGTERM or SIGINT could deadlock the runtime or
+  the display process, because the handler called `threading.Event.set()` while the
+  interrupted `Event.wait` held the same lock. Both processes now stop through a
+  signal-safe self-pipe (`shutdown.py`).
+- **Tests:** 1051 in total, 290 more than before PR A. 19 of 19 mutations of the new
   safety rules are caught.
 
 ## Roadmap
@@ -294,6 +298,9 @@ there means deployment hardening and "M7" hardware integration.
   `/dev/dri/card0` and `/dev/dri/renderD128` present; `/dev/fb0` absent with no display
   connected. Whether a framebuffer appears with the panel attached is unknown; G1
   decides between `/dev/fb0` and a KMS/DRM output.
+- The synthetic Dexcom Share simulator (`share_simulator.main`, a development tool)
+  still stops through `threading.Event.set()` in its signal handler and can hang on
+  stop in the same way; it was outside the scope of the PR #10 shutdown correction.
 - `AuthStateStore` loads the login state once and replaces the file on each change, so
   two processes on one state file can overwrite each other's cooldown, backoff or
   block. A cross-process lock (plan section 12.2) is mandatory before the service and
