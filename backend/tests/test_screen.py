@@ -1,11 +1,9 @@
 import logging
 import os
-import queue
 import signal
 import socket
 import subprocess
 import sys
-import threading
 import time
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -14,6 +12,7 @@ from pathlib import Path
 import pytest
 from harness import EXAMPLE_SNAPSHOT, Harness, write_config
 from PIL import Image
+from processes import SRC, Watched
 
 from glucose_guardian import screen
 from glucose_guardian.alarms import GlucoseLevel, State
@@ -24,10 +23,10 @@ from glucose_guardian.notify import Notifier, notifier_from_environment
 from glucose_guardian.providers import Reading
 from glucose_guardian.screen_model import ScreenSettings, ScreenState, restarting
 from glucose_guardian.screen_render import HEIGHT, WIDTH, Renderer
+from glucose_guardian.shutdown import SIGNALS
 from glucose_guardian.simulation import SCENARIOS
 from glucose_guardian.snapshot import SnapshotDisplay, encode, write_snapshot
 
-SRC = Path(__file__).resolve().parents[1] / "src"
 NOW = datetime(2026, 1, 1, 3, 14, tzinfo=UTC)
 SETTINGS = ScreenSettings(snapshot_max_age_s=5, last_known_cutoff_s=1800,
                           source=Source.DEXCOM_SHARE, outputs_enabled=False)
@@ -196,7 +195,7 @@ def test_display_modules_load_no_dexcom_client_credentials_state_or_network():
     probe = ("import sys, glucose_guardian.screen, glucose_guardian.preview, "
              "glucose_guardian.screen_render; print('\\n'.join(sys.modules))")
     loaded = set(subprocess.run([sys.executable, "-c", probe], check=True, text=True,
-                                capture_output=True,
+                                capture_output=True, timeout=60,
                                 env={**os.environ, "PYTHONPATH": str(SRC)}).stdout.split())
     assert "glucose_guardian.screen" in loaded
     assert loaded & FORBIDDEN == set()
@@ -226,47 +225,8 @@ def service_config(tmp_path: Path) -> Path:
                         ("refresh_s = 1", "refresh_s = 0.1"))
 
 
-class Watched:
-    def __init__(self, module: str, *args: str, env=None) -> None:
-        self.process = subprocess.Popen(
-            [sys.executable, "-m", module, *args], stderr=subprocess.PIPE, text=True,
-            env={**os.environ, "PYTHONPATH": str(SRC), **(env or {})})
-        self.lines: queue.Queue[str] = queue.Queue()
-        self.seen: list[str] = []
-        self.reader = threading.Thread(target=self.read, daemon=True)
-        self.reader.start()
-
-    def read(self) -> None:
-        for line in self.process.stderr:
-            self.lines.put(line)
-
-    def expect(self, text: str, timeout_s: float) -> float:
-        deadline = time.monotonic() + timeout_s
-        while (remaining := deadline - time.monotonic()) > 0:
-            try:
-                line = self.lines.get(timeout=remaining)
-            except queue.Empty:
-                break
-            self.seen.append(line)
-            if text in line:
-                return time.monotonic()
-        raise AssertionError(f"{text!r} not seen within {timeout_s} s")
-
-    def stop(self, sig: signal.Signals) -> str:
-        self.process.send_signal(sig)
-        self.process.wait(10)
-        self.reader.join(10)
-        while not self.lines.empty():
-            self.seen.append(self.lines.get_nowait())
-        return "".join(self.seen)
-
-    def kill(self) -> None:
-        self.process.kill()
-        self.process.wait(10)
-
-
 def test_expect_fails_in_time_when_a_line_never_comes():
-    quiet = Watched("glucose_guardian.screen", "--help")
+    quiet = Watched("-m", "glucose_guardian.screen", "--help")
     try:
         started = time.monotonic()
         with pytest.raises(AssertionError, match="not seen within"):
@@ -286,8 +246,8 @@ def test_display_process_follows_the_runtime_end_to_end(tmp_path):
     receiver.settimeout(10)
     png = tmp_path / "screen.png"
     screen_args = ("--config", str(config), "--png", str(png))
-    runtime = Watched("glucose_guardian.service", "--config", str(config))
-    display = Watched("glucose_guardian.screen", *screen_args,
+    runtime = Watched("-m", "glucose_guardian.service", "--config", str(config))
+    display = Watched("-m", "glucose_guardian.screen", *screen_args,
                       env={"NOTIFY_SOCKET": str(notify_path)})
     try:
         runtime.expect("runtime started", 10)
@@ -299,7 +259,7 @@ def test_display_process_follows_the_runtime_end_to_end(tmp_path):
         killed = time.monotonic()
         noticed = display.expect("screen state no_data (No recent display data)", 10)
         assert noticed - killed <= 1 + 0.1 + 1.5
-        runtime = Watched("glucose_guardian.service", "--config", str(config))
+        runtime = Watched("-m", "glucose_guardian.service", "--config", str(config))
         display.expect("screen state live", 10)
         display.stop(signal.SIGKILL)
         written = screen.load(tmp_path / "display.json").written_monotonic_s
@@ -307,7 +267,7 @@ def test_display_process_follows_the_runtime_end_to_end(tmp_path):
         assert screen.load(tmp_path / "display.json").written_monotonic_s > written
         rest = runtime.stop(signal.SIGTERM)
         assert runtime.process.returncode == 0 and "display error" not in rest
-        display = Watched("glucose_guardian.screen", *screen_args,
+        display = Watched("-m", "glucose_guardian.screen", *screen_args,
                           env={"NOTIFY_SOCKET": str(notify_path)})
         display.expect("screen state no_data (No recent display data)", 10)
         display.stop(signal.SIGTERM)
@@ -324,6 +284,34 @@ def test_display_process_follows_the_runtime_end_to_end(tmp_path):
         for watched in (runtime, display):
             watched.kill()
         receiver.close()
+
+
+@pytest.mark.parametrize("sig", SIGNALS)
+def test_a_signal_ends_the_display_during_a_long_refresh_wait(tmp_path, sig):
+    config = write_config(tmp_path, ("snapshot_max_age_s = 5", "snapshot_max_age_s = 90"),
+                          ("refresh_s = 1", "refresh_s = 60"))
+    display = Watched("-m", "glucose_guardian.screen", "--config", str(config),
+                      "--png", str(tmp_path / "screen.png"))
+    try:
+        display.expect("screen state no_data", 10)
+        rest = display.stop(sig)
+    finally:
+        display.kill()
+    assert display.process.returncode == screen.EXIT_STOPPED
+    assert "display stopped" in rest
+
+
+def test_display_stops_cleanly_in_repeated_rapid_start_stop_cycles(tmp_path):
+    screen_args = ("--config", str(service_config(tmp_path)), "--png", str(tmp_path / "s.png"))
+    for trial in range(6):
+        display = Watched("-m", "glucose_guardian.screen", *screen_args)
+        try:
+            display.expect("screen state", 10)
+            rest = display.stop(SIGNALS[trial % 2])
+        finally:
+            display.kill()
+        assert display.process.returncode == screen.EXIT_STOPPED
+        assert "display stopped" in rest
 
 
 def test_screen_settings_follow_the_configuration(tmp_path):
