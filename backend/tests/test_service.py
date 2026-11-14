@@ -1,12 +1,12 @@
 import json
 import os
 import signal
-import subprocess
-import sys
 import time
 from pathlib import Path
 
+import pytest
 from harness import write_config as write
+from processes import Watched, open_pipes
 from share_harness import DEXCOM_EXAMPLE
 
 from glucose_guardian import service
@@ -15,25 +15,55 @@ from glucose_guardian.credentials import PASSWORD_FILE, USERNAME_FILE
 from glucose_guardian.display import FanOutDisplay, LogDisplay, Source
 from glucose_guardian.serial_transport import SerialTransport
 from glucose_guardian.share_simulator import SYNTHETIC_PASSWORD, SYNTHETIC_USERNAME
+from glucose_guardian.shutdown import SIGNALS
 from glucose_guardian.snapshot import read_snapshot
 from glucose_guardian.transport import SimulatedTransport
 
-SRC = Path(__file__).resolve().parents[1] / "src"
+LONG_WAIT = (("heartbeat_timeout_s = 5", "heartbeat_timeout_s = 120"),
+             ("tick_s = 1", "tick_s = 60"), ("snapshot_max_age_s = 5", "snapshot_max_age_s = 90"))
 
 
-def test_service_starts_and_stops_cleanly_on_sigterm(tmp_path):
+@pytest.mark.parametrize("sig", SIGNALS)
+def test_service_starts_and_stops_cleanly_on_each_signal(tmp_path, sig):
     config = write(tmp_path, ("tick_s = 1", "tick_s = 0.05"))
-    process = subprocess.Popen(
-        [sys.executable, "-m", "glucose_guardian.service", "--config", str(config)],
-        stderr=subprocess.PIPE, text=True, env={**os.environ, "PYTHONPATH": str(SRC)})
+    runtime = Watched("-m", "glucose_guardian.service", "--config", str(config))
     try:
-        assert "runtime started: scenario=normal transport=simulated" in process.stderr.readline()
-        process.send_signal(signal.SIGTERM)
-        _, rest = process.communicate(timeout=10)
+        runtime.expect("runtime started: scenario=normal transport=simulated", 10)
+        rest = runtime.stop(sig)
     finally:
-        process.kill()
-    assert process.returncode == service.EXIT_STOPPED
+        runtime.kill()
+    assert runtime.process.returncode == service.EXIT_STOPPED
     assert "runtime stopped after" in rest
+
+
+@pytest.mark.parametrize("sig", SIGNALS)
+def test_a_signal_ends_the_runtime_during_a_long_tick_wait(tmp_path, sig):
+    config = write(tmp_path, *LONG_WAIT)
+    runtime = Watched("-m", "glucose_guardian.service", "--config", str(config))
+    try:
+        runtime.expect("runtime started", 10)
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "display.json").exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        rest = runtime.stop(sig)
+    finally:
+        runtime.kill()
+    assert runtime.process.returncode == service.EXIT_STOPPED
+    assert "runtime stopped after 1 ticks" in rest
+
+
+def test_service_stops_cleanly_in_repeated_rapid_start_stop_cycles(tmp_path):
+    config = write(tmp_path, ("tick_s = 1", "tick_s = 0.05"))
+    for trial in range(6):
+        runtime = Watched("-m", "glucose_guardian.service", "--config", str(config))
+        try:
+            runtime.expect("runtime started", 10)
+            rest = runtime.stop(SIGNALS[trial % 2])
+        finally:
+            runtime.kill()
+        assert runtime.process.returncode == service.EXIT_STOPPED
+        assert "runtime stopped after" in rest
 
 
 def test_invalid_config_exits_with_config_error(tmp_path):
@@ -45,9 +75,11 @@ def test_runtime_crash_exits_with_crash_code_and_restores_signals(tmp_path, monk
         raise RuntimeError("synthetic")
 
     monkeypatch.setattr(service.Runtime, "run", crash)
-    before = signal.getsignal(signal.SIGTERM)
+    before = {sig: signal.getsignal(sig) for sig in SIGNALS}
+    pipes = open_pipes()
     assert service.main(["--config", str(write(tmp_path))]) == service.EXIT_CRASHED
-    assert signal.getsignal(signal.SIGTERM) is before
+    assert {sig: signal.getsignal(sig) for sig in SIGNALS} == before
+    assert open_pipes() == pipes
 
 
 def test_build_transport_follows_the_config(tmp_path):
@@ -105,26 +137,21 @@ def test_share_server_follows_the_configured_region(tmp_path):
 def test_service_reads_from_the_share_simulator_end_to_end(tmp_path, simulator):
     config = dexcom_config(tmp_path, f'server = "simulator"\nsimulator_port = {simulator.port}',
                            tmp_path)
-    process = subprocess.Popen(
-        [sys.executable, "-m", "glucose_guardian.service", "--config", str(config)],
-        stderr=subprocess.PIPE, text=True,
-        env={**os.environ, "PYTHONPATH": str(SRC),
-             "CREDENTIALS_DIRECTORY": str(credentials_dir(tmp_path))})
+    runtime = Watched("-m", "glucose_guardian.service", "--config", str(config),
+                      env={"CREDENTIALS_DIRECTORY": str(credentials_dir(tmp_path))})
     try:
-        line = process.stderr.readline()
-        assert "runtime started: provider=dexcom_share server=simulator" in line
+        runtime.expect("runtime started: provider=dexcom_share server=simulator", 10)
         deadline = time.monotonic() + 15
         while simulator.requests["read"] < 1:
             assert time.monotonic() < deadline, "service never read from the simulator"
             time.sleep(0.05)
-        process.send_signal(signal.SIGTERM)
-        _, rest = process.communicate(timeout=10)
+        output = runtime.stop(signal.SIGTERM)
     finally:
-        process.kill()
-    assert process.returncode == service.EXIT_STOPPED
+        runtime.kill()
+    assert runtime.process.returncode == service.EXIT_STOPPED
     assert (simulator.requests["authenticate"], simulator.requests["login"]) == (1, 1)
     for secret in (SYNTHETIC_USERNAME, SYNTHETIC_PASSWORD):
-        assert secret not in line + rest
+        assert secret not in output
     assert json.loads((tmp_path / "dexcom-share-state.json").read_text())[
         "blocked_reason"] is None
 
@@ -148,20 +175,17 @@ def test_missing_snapshot_directory_refuses_to_start(tmp_path, caplog):
 
 def test_simulated_service_writes_a_simulated_snapshot(tmp_path):
     config = write(tmp_path, ("tick_s = 1", "tick_s = 0.05"))
-    process = subprocess.Popen(
-        [sys.executable, "-m", "glucose_guardian.service", "--config", str(config)],
-        stderr=subprocess.PIPE, text=True, env={**os.environ, "PYTHONPATH": str(SRC)})
+    runtime = Watched("-m", "glucose_guardian.service", "--config", str(config))
     try:
-        assert "display=snapshot" in process.stderr.readline()
+        runtime.expect("display=snapshot", 10)
         deadline = time.monotonic() + 10
         while not (tmp_path / "display.json").exists():
             assert time.monotonic() < deadline
             time.sleep(0.05)
         written = read_snapshot(tmp_path / "display.json")
-        process.send_signal(signal.SIGTERM)
-        _, rest = process.communicate(timeout=10)
+        rest = runtime.stop(signal.SIGTERM)
     finally:
-        process.kill()
+        runtime.kill()
     assert (written.source, written.source_status, written.outputs_enabled) == (
         Source.SIMULATED, None, False)
     assert "110" not in rest
