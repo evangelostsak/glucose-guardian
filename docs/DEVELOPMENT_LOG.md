@@ -1,5 +1,110 @@
 # Development log
 
+## 2026-11-14 — PR #10: SIGTERM and SIGINT shutdown deadlock
+
+Nothing contacted Dexcom; nothing was deployed or flashed; no credential, configuration
+or state file was touched. PR B was not started.
+
+### Defect
+
+- **Symptom:** CI run 43498783112 on `ae3a031` (job `python (3.11)`) failed one test,
+  `test_simulated_service_writes_a_simulated_snapshot`: after SIGTERM the service did
+  not exit, and `communicate(timeout=10)` expired. The other jobs and the other CI run
+  on the same commit passed.
+- **Cause:** `service.main` and `screen.main` installed
+  `lambda signum, frame: stop.set()` for SIGTERM and SIGINT, with
+  `stop = threading.Event()`, and the loops waited in `stop.wait(timeout)`. CPython
+  runs a Python signal handler in the main thread between bytecodes. `Event.wait`
+  holds the Event's condition lock, a non-reentrant `threading.Lock`, while it checks
+  the flag and after its timed wait. A signal in that window runs `Event.set`, which
+  waits for the same lock that the interrupted frame holds, so the main thread waits on
+  itself forever.
+- **Evidence:** the `faulthandler` stack of a hung process ends in the handler, then
+  `Event.set`, then `Condition.__enter__`, inside `Event.wait`. A tight loop
+  (`while not stop.wait(0)`) hung in 38 of 60 trials on Python 3.11.18 and 13 of 30 on
+  3.13.18, and 9 of 20 on 3.13.18 during this task. With the service's real timing the
+  window is small: 0 hangs in 460 local attempts, 1 in CI.
+- **Impact:** a stop could hang the runtime or the display process until it was
+  killed. A hung runtime sends no heartbeats, so the Uno demands its link-lost alarm
+  and the display turns to NO DATA; the failure direction is not silent, but a
+  restart under systemd (PR B) would wait for the stop timeout.
+
+### Correction
+
+- **New module `shutdown.py`:**
+  - `StopRequest` owns a pipe from `os.pipe2(O_NONBLOCK | O_CLOEXEC)`.
+  - Its handler `request` makes one `os.write` of one byte and ignores `OSError`; a
+    full pipe already means that a stop was requested. It takes no lock and does not
+    log.
+  - `wait(timeout_s) -> bool` polls the read end with `select.poll`. CPython rounds the
+    millisecond timeout up, and a negative timeout counts as 0, as with `Event.wait`.
+    The pipe is never drained, so every wait after a request returns True at once,
+    like a set Event.
+  - EINTR: under PEP 475 `poll` retries after the handler has run, and the byte the
+    handler wrote ends the retried poll at once.
+  - `stop_on_signals()` installs the handler for SIGTERM and SIGINT. An `ExitStack`
+    restores each previous handler and then closes both descriptors on every exit
+    path: normal return, exception, or a failure while installing.
+- **`service.main` and `screen.main`** use `stop_on_signals()`. The "runtime started"
+  log line moved inside the context, so it still marks installed handlers. Both
+  modules no longer import `threading` or `signal`.
+- **Unchanged:** Dexcom authentication, alarm evaluation, heartbeats, the serial
+  protocol, display rendering, physical outputs, the `wait(timeout_s) -> bool`
+  contract and its timing. No thread, busy loop or dependency was added.
+- **Not changed:** `share_simulator.main`, the synthetic Dexcom Share simulator, uses
+  the same Event pattern. It was outside the approved scope and is listed as a gap.
+
+### Tests
+
+- **Shared helper `tests/processes.py`:** `Watched`, moved from `test_screen.py`,
+  merges stdout and stderr, gives the child a stdin pipe and bounds every wait by a
+  deadline (10 s); every caller kills the child in `finally`. `open_pipes()` lists the
+  pipe descriptors of the test process.
+- **New `tests/test_shutdown.py` (12 tests):**
+  - the wait timeout without a request, at 0 and below 0;
+  - a request makes every later wait return True at once;
+  - both descriptors are non-blocking and close-on-exec, and `close` closes both and
+    can run twice;
+  - more requests than the pipe holds neither block nor raise;
+  - handlers restored and descriptors closed after a normal exit and after an
+    exception;
+  - SIGTERM and SIGINT during a 30 s wait end it promptly;
+  - 1000 alternating signals inside the context;
+  - **deterministic reproduction:** a child running the old handler while it holds the
+    Event's lock never returns from the handler (bounded by 2 s, then killed);
+  - **stress:** 40 child processes in a tight `wait(0)` loop, stopped alternately by
+    SIGTERM and SIGINT, each must stop within 10 s;
+  - **burst:** 200 alternating signals to one waiting child, which stops exactly once.
+- **`test_service.py`:** every subprocess test uses `Watched` with deadlines and a
+  `finally` kill, including `test_simulated_service_writes_a_simulated_snapshot`. New:
+  a clean stop on each signal; a stop by each signal during a 60 s tick wait; six rapid
+  start and stop cycles. The crash test now checks both handlers and the pipes.
+- **`test_screen.py`:** a stop by each signal during a 60 s refresh wait; six rapid
+  start and stop cycles; the module probe got a 60 s timeout.
+- **Against the old pattern:** with `StopRequest` rebuilt on `threading.Event`, the
+  stress test and the burst test failed in 5 of 5 runs on each Python version, and the
+  deterministic test reproduces the deadlock on every run.
+- **Python 3.11.18 and 3.13.18** (`make lint typecheck test`): ruff clean, mypy strict
+  clean (37 files), pytest 1051 passed on both.
+- **Repeated runs:**
+  - the 24 shutdown-related tests, 15 times on each version: all passed;
+  - `test_shutdown.py` four at a time in parallel, three rounds: all passed;
+  - the earlier service reproduction (200 SIGTERMs at varied delays, eight in
+    parallel): 0 hangs on each version.
+
+### Unresolved
+
+- If the kernel delivers a stop signal to a worker thread, CPython runs the handler
+  only when the main thread next runs bytecode, so the stop can wait for the current
+  `tick_s` or `refresh_s`. This was also true before.
+- A second signal after shutdown has begun reaches the restored handler: SIGTERM ends
+  the process with the default action, SIGINT raises `KeyboardInterrupt`. This is
+  unchanged.
+- The first full 3.11 run printed one `BrokenPipeError` line outside any test result;
+  every test passed, three more full runs did not show it, and its source was not
+  found.
+- Not run on the Pi.
+
 ## 2026-11-13 — PR #10 review: neutral wording for missing or expired snapshots
 
 ### Change
